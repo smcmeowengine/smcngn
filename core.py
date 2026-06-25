@@ -856,7 +856,13 @@ _fired_signals: dict[str, float] = {}
 SIGNAL_COOLDOWN_S = 4 * 60 * 60
 
 def is_duplicate(sig: SMCSignal) -> bool:
-    key  = f"{sig.symbol}_{sig.direction}"
+    key = f"{sig.symbol}_{sig.direction}"
+    # Block if still an active unresolved signal (regardless of cooldown age)
+    active = _active_signals.get(key)
+    if active and not active.get("resolved", False):
+        print(f"  [DEDUP] {key} blocked — trade still active")
+        return True
+    # Block if within the 4-hour cooldown window
     last = _fired_signals.get(key, 0)
     return (time.time() - last) < SIGNAL_COOLDOWN_S
 
@@ -880,6 +886,9 @@ def scan_symbol(symbol: str) -> SMCSignal | None:
         print(f"  [SCAN ERROR] {symbol}: {e}")
         return None
 
+TOP_N_SIGNALS = 5   # Only send the best N signals per scan
+
+
 def run_scan() -> None:
     print(f"\n[SCAN] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
           f"— {len(WATCHLIST)} symbols")
@@ -894,53 +903,250 @@ def run_scan() -> None:
             print(f"  —  {symbol} no signal")
         time.sleep(0.25)
 
+    # ── Sort by confluence desc, keep only top N ─────────────────────────────
     signals.sort(key=lambda s: s.confluence, reverse=True)
+    signals = signals[:TOP_N_SIGNALS]
 
     if not signals:
         print("  [SCAN] No signals this round.")
         return
 
+    print(f"\n  [TOP {TOP_N_SIGNALS}] Sending best signals:")
     for sig in signals:
-        send_telegram(format_signal_message(sig))
+        msg_id = send_telegram_get_id(format_signal_message(sig))
         mark_fired(sig)
+        if msg_id:
+            track_active_signal(sig, msg_id)
         print(f"  📤 Sent: {sig.symbol} {sig.direction.upper()} "
-              f"{sig.signal_grade} | Entry: {fmt_price(sig.exact_entry)}")
+              f"{sig.signal_grade} | Entry: {fmt_price(sig.exact_entry)} "
+              f"| msg_id: {msg_id}")
         time.sleep(0.5)
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# STATE PERSISTENCE  (cooldown memory across GitHub Actions runs)
+# TELEGRAM — send and return message_id
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def send_telegram_get_id(text: str) -> int | None:
+    """Send a Telegram message and return its message_id."""
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    for attempt in range(3):
+        try:
+            r = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text,
+                                          "parse_mode": "HTML"}, timeout=10)
+            r.raise_for_status()
+            return r.json().get("result", {}).get("message_id")
+        except Exception as e:
+            if attempt == 2:
+                print(f"[TG ERROR] {e}")
+            time.sleep(2)
+    return None
+
+def react_to_message(message_id: int, emoji: str) -> None:
+    """
+    Send a reaction to an existing Telegram message.
+    Uses setMessageReaction (Bot API 7.0+).
+    """
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/setMessageReaction"
+    try:
+        r = requests.post(url, json={
+            "chat_id":    TG_CHAT_ID,
+            "message_id": message_id,
+            "reaction":   [{"type": "emoji", "emoji": emoji}],
+            "is_big":     True,
+        }, timeout=10)
+        r.raise_for_status()
+        print(f"  [REACT] {emoji} → msg {message_id}")
+    except Exception as e:
+        print(f"  [REACT ERROR] msg {message_id}: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ACTIVE SIGNAL TRACKING  (for reaction feature)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# _active_signals stores signals that have been sent but not yet resolved.
+# Each entry:
+#   key   : "{symbol}_{direction}"
+#   value : {
+#       "symbol", "direction", "exact_entry", "stop_loss",
+#       "take_profit_1", "take_profit_2",
+#       "message_id",          ← Telegram message to react to
+#       "tp1_hit": bool,       ← True once TP1 reacted
+#       "resolved": bool,      ← True once SL or TP2 reacted (final)
+#       "sent_at": float       ← Unix timestamp
+#   }
+#
+# Signals are removed from tracking after 7 days (max trade duration assumed).
+
+_active_signals: dict[str, dict] = {}
+ACTIVE_SIGNAL_TTL_S = 7 * 24 * 60 * 60   # 7 days
+
+
+def track_active_signal(sig: SMCSignal, message_id: int) -> None:
+    key = f"{sig.symbol}_{sig.direction}"
+    _active_signals[key] = {
+        "symbol":          sig.symbol,
+        "direction":       sig.direction,
+        "exact_entry":     sig.exact_entry,
+        "entry_zone_high": sig.entry_zone_high,
+        "entry_zone_low":  sig.entry_zone_low,
+        "stop_loss":       sig.stop_loss,
+        "take_profit_1":   sig.take_profit_1,
+        "take_profit_2":   sig.take_profit_2,
+        "message_id":      message_id,
+        "entered":         False,   # True once price touches the entry zone
+        "tp1_hit":         False,
+        "resolved":        False,
+        "sent_at":         time.time(),
+    }
+
+
+def get_mid_price(symbol: str) -> float | None:
+    """Fetch current mid price from Hyperliquid."""
+    try:
+        raw = hl_post({"type": "allMids"})
+        if raw:
+            coin = hl_coin(symbol)
+            val  = raw.get(coin)
+            if val:
+                return float(val)
+    except Exception as e:
+        print(f"  [PRICE ERROR] {symbol}: {e}")
+    return None
+
+
+def check_reactions() -> None:
+    """
+    For every active (unresolved) signal, fetch current price and:
+
+    Phase 1 — Waiting for entry:
+      Price must touch the entry zone (entry_zone_low–entry_zone_high)
+      or reach the exact limit entry before TP/SL monitoring begins.
+      Until then: do nothing (trade not filled yet).
+
+    Phase 2 — Trade active:
+      🔥  TP1 hit before SL
+      🏆  TP2 also hit (full winner)
+      😭  SL hit before TP1
+    """
+    now     = time.time()
+    to_drop = []
+
+    for key, s in _active_signals.items():
+        if s["resolved"]:
+            to_drop.append(key)
+            continue
+
+        # Expire old signals
+        if now - s["sent_at"] > ACTIVE_SIGNAL_TTL_S:
+            print(f"  [REACT] {key} expired after 7d — dropping")
+            to_drop.append(key)
+            continue
+
+        price = get_mid_price(s["symbol"])
+        if price is None:
+            continue
+
+        direction  = s["direction"]
+        entry      = s["exact_entry"]
+        zone_high  = s["entry_zone_high"]
+        zone_low   = s["entry_zone_low"]
+        sl         = s["stop_loss"]
+        tp1        = s["take_profit_1"]
+        tp2        = s["take_profit_2"]
+        msg_id     = s["message_id"]
+
+        # ── Phase 1: Check if price has reached the exact limit entry ────────
+        if not s["entered"]:
+            filled = (direction == "long"  and price <= entry) or \
+                     (direction == "short" and price >= entry)
+            if filled:
+                s["entered"] = True
+                print(f"  [REACT] {key} — limit order filled at {fmt_price(price)} "
+                      f"(exact entry: {fmt_price(entry)})")
+            else:
+                print(f"  [REACT WAIT] {key} | price={fmt_price(price)} "
+                      f"| waiting for exact entry {fmt_price(entry)}")
+                continue   # limit order not filled yet — skip TP/SL check
+
+        # ── Phase 2: Monitor TP / SL ──────────────────────────────────────────
+        print(f"  [REACT CHECK] {key} | price={fmt_price(price)} "
+              f"| sl={fmt_price(sl)} tp1={fmt_price(tp1)} tp2={fmt_price(tp2)}")
+
+        if direction == "long":
+            sl_hit  = price <= sl
+            tp1_hit = price >= tp1
+            tp2_hit = price >= tp2
+        else:
+            sl_hit  = price >= sl
+            tp1_hit = price <= tp1
+            tp2_hit = price <= tp2
+
+        if sl_hit and not s["tp1_hit"]:
+            react_to_message(msg_id, "😭")
+            s["resolved"] = True
+            to_drop.append(key)
+
+        elif tp2_hit:
+            if not s["tp1_hit"]:
+                react_to_message(msg_id, "🔥")
+                s["tp1_hit"] = True
+            react_to_message(msg_id, "🏆")
+            s["resolved"] = True
+            to_drop.append(key)
+
+        elif tp1_hit and not s["tp1_hit"]:
+            react_to_message(msg_id, "🔥")
+            s["tp1_hit"] = True
+
+        time.sleep(0.2)
+
+    for key in to_drop:
+        _active_signals.pop(key, None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATE PERSISTENCE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 STATE_FILE = pathlib.Path("state.json")
 
+
 def load_state() -> None:
-    """Load _fired_signals from state.json (written by previous run)."""
-    global _fired_signals
+    global _fired_signals, _active_signals
     if STATE_FILE.exists():
         try:
-            data = json.loads(STATE_FILE.read_text())
-            # Values are Unix timestamps (floats)
-            _fired_signals = {k: float(v) for k, v in data.items()}
-            print(f"  [STATE] Loaded {len(_fired_signals)} cooldown entries from {STATE_FILE}")
+            data           = json.loads(STATE_FILE.read_text())
+            _fired_signals = {k: float(v)
+                              for k, v in data.get("fired_signals", {}).items()}
+            _active_signals = data.get("active_signals", {})
+            print(f"  [STATE] Loaded {len(_fired_signals)} cooldown + "
+                  f"{len(_active_signals)} active signals")
         except Exception as e:
-            print(f"  [STATE] Could not load state.json: {e} — starting fresh")
-            _fired_signals = {}
+            print(f"  [STATE] Load error: {e} — starting fresh")
+            _fired_signals  = {}
+            _active_signals = {}
     else:
-        print("  [STATE] No state.json found — starting fresh")
-        _fired_signals = {}
+        print("  [STATE] No state.json — starting fresh")
+        _fired_signals  = {}
+        _active_signals = {}
+
 
 def save_state() -> None:
-    """Persist _fired_signals to state.json for the next run."""
     try:
-        STATE_FILE.write_text(json.dumps(_fired_signals, indent=2))
-        print(f"  [STATE] Saved {len(_fired_signals)} cooldown entries to {STATE_FILE}")
+        STATE_FILE.write_text(json.dumps({
+            "fired_signals":  _fired_signals,
+            "active_signals": _active_signals,
+        }, indent=2))
+        print(f"  [STATE] Saved {len(_fired_signals)} cooldown + "
+              f"{len(_active_signals)} active signals")
     except Exception as e:
-        print(f"  [STATE] Could not save state.json: {e}")
+        print(f"  [STATE] Save error: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# MAIN  —  single scan, then exit
-#          GitHub Actions cron (every 15 min) replaces the while True loop
+# MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
@@ -948,24 +1154,32 @@ def main() -> None:
     print("  SMC Signal Engine v2.0  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
+    print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
     print("  Timeframes: 4H / 1H / 15M")
-    print("  Scheduled via GitHub Actions cron every 15 minutes")
     print("=" * 60)
 
-    # Restore cooldown memory from the previous run
     load_state()
 
-    # Run one scan
+    # ── Step 1: Check reactions on previously sent signals ───────────────────
+    if _active_signals:
+        print(f"\n[REACTIONS] Checking {len(_active_signals)} active signal(s)...")
+        try:
+            check_reactions()
+        except Exception as e:
+            print(f"[REACT ERROR] {e}")
+    else:
+        print("\n[REACTIONS] No active signals to check.")
+
+    # ── Step 2: Run new scan ─────────────────────────────────────────────────
     try:
         run_scan()
     except Exception as e:
         print(f"[MAIN ERROR] {e}")
         send_telegram(f"⚠️ SMC Engine error: {e}")
 
-    # Persist cooldown memory for the next run
     save_state()
-
     print("  [DONE] Scan complete. Exiting.")
+
 
 if __name__ == "__main__":
     main()
