@@ -80,6 +80,12 @@ _hl_last_req_ts  = 0.0
 _hl_min_interval = 0.2
 _hl_session      = requests.Session()
 
+# ── 4H CANDLE CACHE ───────────────────────────────────────────────────────────
+# 4H candles only close every 4 hours; caching them for 60 min per scan run
+# cuts API calls from 75 → ~50 (saves one round-trip per symbol).
+_candle_cache: dict[str, dict] = {}   # key: symbol → {"candles": [...], "ts": float}
+_CANDLE_CACHE_TTL_S = 60 * 60         # 60-minute TTL (well within a 4H close)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATA STRUCTURES
@@ -182,6 +188,20 @@ def get_candles(symbol: str, interval: str, n: int) -> list[dict]:
                 "l": float(c["l"]), "c": float(c["c"]), "v": float(c["v"])}
                for c in raw]
     return [c for c in candles if c["t"] < end_ms][-n:]
+
+
+def get_candles_4h_cached(symbol: str) -> list[dict]:
+    """
+    Return 4H candles from the in-memory cache when fresh (< 60 min old).
+    Falls back to a live fetch and populates the cache on miss/expiry.
+    This avoids fetching the same 4H data 25 times per scan run.
+    """
+    entry = _candle_cache.get(symbol)
+    if entry and (time.time() - entry["ts"]) < _CANDLE_CACHE_TTL_S:
+        return entry["candles"]
+    candles = get_candles(symbol, "4h", N_4H)
+    _candle_cache[symbol] = {"candles": candles, "ts": time.time()}
+    return candles
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -776,74 +796,68 @@ def send_telegram(text: str) -> None:
             time.sleep(2)
 
 def format_signal_message(sig: SMCSignal) -> str:
-    dir_emoji   = "🟢" if sig.direction == "long" else "🔴"
-    dir_label   = "▲ LONG" if sig.direction == "long" else "▼ SHORT"
-    grade_emoji = {"A+": "🏆", "A": "⭐", "B": "📊"}.get(sig.signal_grade, "📊")
+    dir_label   = "LONG" if sig.direction == "long" else "SHORT"
+    dir_marker  = "▲" if sig.direction == "long" else "▼"
 
-    # Max score is 7 (or 8 with golden zone double)
-    max_score = 8
-    filled    = "🔵" * min(sig.confluence, max_score)
-    empty     = "⚪" * max(0, max_score - sig.confluence)
-    conf_bar  = filled + empty
-
-    # Combo labels
+    # Combo labels (no emojis)
     combo_labels = {
-        "HTF_BIAS":   "✅ HTF Bias (4H)",
-        "4H_OB":      "✅ 4H Order Block",
-        "FVG":        "✅ FVG (Combo 1)",
-        "LIQ_SWEEP":  "✅ Liquidity Sweep (Combo 2)",
-        "15M_MSB":    "✅ 15M MSB Confirmed",
-        "15M_OB_FVG": "✅ 15M OB/FVG Entry",
-        "FIB_GOLDEN": "✅ Fib Golden Zone 0.618–0.786 🔥",
-        "FIB_LEVEL":  f"✅ Fib Level ({sig.details.get('fib_zone', '')})",
+        "HTF_BIAS":   "HTF Bias (4H)",
+        "4H_OB":      "4H Order Block",
+        "FVG":        "FVG (Combo 1)",
+        "LIQ_SWEEP":  "Liquidity Sweep (Combo 2)",
+        "15M_MSB":    "15M MSB Confirmed",
+        "15M_OB_FVG": "15M OB/FVG Entry",
+        "FIB_GOLDEN": "Fib Golden Zone 0.618–0.786",
+        "FIB_LEVEL":  f"Fib Level ({sig.details.get('fib_zone', '')})",
     }
-    combo_str = "\n".join(combo_labels.get(c, c) for c in sig.combos_hit)
+    combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
 
-    # Fibonacci section
+    # Fibonacci section (compact, no emojis)
     fib_section = ""
     if sig.fib:
         f = sig.fib
-        golden_tag = "  🔥 GOLDEN ZONE" if f.in_golden_zone else ""
+        golden_tag = "  ← golden zone" if f.in_golden_zone else ""
         fib_section = (
-            f"\n<b>📐 Fibonacci (4H Swing)</b>\n"
-            f"  Swing High: <code>{fmt_price(f.swing_high)}</code>\n"
-            f"  Swing Low:  <code>{fmt_price(f.swing_low)}</code>\n"
+            f"\n<b>Fibonacci (4H)</b>\n"
             f"  0.382 → <code>{fmt_price(f.fib_382)}</code>\n"
             f"  0.500 → <code>{fmt_price(f.fib_50)}</code>\n"
             f"  0.618 → <code>{fmt_price(f.fib_618)}</code>{golden_tag}\n"
             f"  0.786 → <code>{fmt_price(f.fib_786)}</code>{golden_tag}\n"
-            f"  Nearest level: <b>{f.nearest_name}</b>\n"
         )
 
-    # Entry reason
     entry_reason = sig.details.get("exact_entry_reason", "")
     entry_src    = sig.details.get("entry_source", "Zone")
     htf_bias     = sig.details.get("htf_bias", "").upper()
+    max_score    = 8
 
-    # R:R lines
     rr1 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_1, sig.direction)
     rr2 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_2, sig.direction)
 
+    cur_price = sig.details.get("current_price")
+    dist_pct  = sig.details.get("entry_dist_pct")
+    if cur_price is not None:
+        dist_str       = f"  ({dist_pct:.1f}% from entry)" if dist_pct is not None else ""
+        cur_price_line = f"Current price: <code>{fmt_price(cur_price)}</code>{dist_str}\n"
+    else:
+        cur_price_line = ""
+
     msg = (
-        f"{dir_emoji} <b>SMC SIGNAL — {sig.symbol}</b>  {grade_emoji} Grade <b>{sig.signal_grade}</b>\n"
-        f"<b>{dir_label}</b>  |  4H Bias: <b>{htf_bias}</b>  |  {sig.timestamp}\n"
+        f"<b>{dir_marker} {sig.symbol} — {dir_label}</b>  |  Grade <b>{sig.signal_grade}</b>  |  {sig.confluence}/{max_score}\n"
+        f"4H Bias: <b>{htf_bias}</b>  |  {sig.timestamp}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>📌 Entry Zone ({entry_src})</b>\n"
-        f"  Zone High: <code>{fmt_price(sig.entry_zone_high)}</code>\n"
-        f"  Zone Low:  <code>{fmt_price(sig.entry_zone_low)}</code>\n\n"
-        f"<b>🎯 EXACT LIMIT ENTRY: <code>{fmt_price(sig.exact_entry)}</code></b>\n"
-        f"  ↳ Based on: {entry_reason}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>🛑 Stop Loss:</b>   <code>{fmt_price(sig.stop_loss)}</code>\n"
-        f"<b>💰 TP1 (1:2):</b>  <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
-        f"<b>🚀 TP2 (full):</b> <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
+        f"{cur_price_line}"
+        f"\n<b>Entry Zone</b> ({entry_src})\n"
+        f"  High: <code>{fmt_price(sig.entry_zone_high)}</code>\n"
+        f"  Low:  <code>{fmt_price(sig.entry_zone_low)}</code>\n"
+        f"\n<b>Limit Entry: <code>{fmt_price(sig.exact_entry)}</code></b>\n"
+        f"  ↳ {entry_reason}\n"
+        f"\n<b>Stop Loss:</b>  <code>{fmt_price(sig.stop_loss)}</code>\n"
+        f"<b>TP1:</b>        <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
+        f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"<b>Confluence:</b> {conf_bar}  {sig.confluence}/{max_score}\n"
+        f"\n<b>Confluence:</b> {sig.confluence}/{max_score}\n"
         f"{combo_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ TF Stack: 4H → 1H → 15M\n"
-        f"🤖 SMC Engine v2.0 | Combo 1+2+Fib"
     )
     return msg
 
@@ -876,17 +890,49 @@ def mark_fired(sig: SMCSignal) -> None:
 
 def scan_symbol(symbol: str) -> SMCSignal | None:
     try:
-        c4h  = get_candles(symbol, "4h",  N_4H)
+        c4h  = get_candles_4h_cached(symbol)   # served from cache after first fetch
         c1h  = get_candles(symbol, "1h",  N_1H)
         c15m = get_candles(symbol, "15m", N_15M)
         if len(c4h) < 60 or len(c1h) < 60 or len(c15m) < 60:
             return None
+
+        # ── Volatility Filter ─────────────────────────────────────────────────
+        # If the current 15M ATR is > 3× its 20-period average, price is in a
+        # news spike or erratic expansion — skip to avoid unreliable signals.
+        if len(c15m) >= 21:
+            current_atr = calc_atr(c15m[-2:] + [c15m[-1]], period=1)   # single-bar TR
+            # Use the True Range of the last bar as "current ATR"
+            last = c15m[-1]
+            prev = c15m[-2]
+            current_atr = max(last["h"] - last["l"],
+                              abs(last["h"] - prev["c"]),
+                              abs(last["l"] - prev["c"]))
+            avg_atr_20 = calc_atr(c15m, period=20)
+            if avg_atr_20 > 0 and current_atr > avg_atr_20 * 3.0:
+                print(f"  [VOLATILE — skipped] {symbol} | "
+                      f"current TR={current_atr:.6f} > 3× avg ATR({avg_atr_20:.6f})")
+                return None
+
         return compute_smc_signal(symbol, c15m, c1h, c4h)
     except Exception as e:
         print(f"  [SCAN ERROR] {symbol}: {e}")
         return None
 
 TOP_N_SIGNALS = 5   # Only send the best N signals per scan
+
+# Direction cap: max longs / shorts in the final batch (correlation guard)
+MAX_SAME_DIRECTION = 2
+
+
+def fetch_all_mids() -> dict[str, float]:
+    """Fetch all mid prices in a single API call. Returns {coin: price}."""
+    try:
+        raw = hl_post({"type": "allMids"})
+        if raw:
+            return {k: float(v) for k, v in raw.items() if v}
+    except Exception as e:
+        print(f"  [MIDS ERROR] {e}")
+    return {}
 
 
 def run_scan() -> None:
@@ -903,17 +949,67 @@ def run_scan() -> None:
             print(f"  —  {symbol} no signal")
         time.sleep(0.25)
 
-    # ── Sort by confluence desc, keep only top N ─────────────────────────────
+    # ── Sort by confluence desc ──────────────────────────────────────────────
     signals.sort(key=lambda s: s.confluence, reverse=True)
-    signals = signals[:TOP_N_SIGNALS]
 
-    if not signals:
+    # ── R:R Sanity Check (filter before direction cap) ───────────────────────
+    # Drop signals whose reward-to-risk < 1.5.  Do NOT mark_fired so the
+    # symbol can generate a fresh signal next scan if conditions improve.
+    rr_passed = []
+    for sig in signals:
+        risk   = abs(sig.exact_entry - sig.stop_loss)
+        reward = abs(sig.take_profit_1 - sig.exact_entry)
+        rr     = reward / risk if risk > 0 else 0.0
+        if rr < 1.5:
+            print(f"  [RR FILTER] {sig.symbol} {sig.direction.upper()} dropped "
+                  f"— RR={rr:.2f} < 1.5 (entry={fmt_price(sig.exact_entry)} "
+                  f"sl={fmt_price(sig.stop_loss)} tp1={fmt_price(sig.take_profit_1)})")
+        else:
+            rr_passed.append(sig)
+
+    # ── Direction Cap (correlation guard) ────────────────────────────────────
+    # Allow at most MAX_SAME_DIRECTION longs and MAX_SAME_DIRECTION shorts in
+    # the final batch.  Already sorted by confluence, so we drop tail signals.
+    capped: list[SMCSignal] = []
+    long_count = short_count = 0
+    for sig in rr_passed:
+        if sig.direction == "long":
+            if long_count < MAX_SAME_DIRECTION:
+                capped.append(sig)
+                long_count += 1
+            else:
+                print(f"  [DIR CAP] {sig.symbol} LONG dropped — "
+                      f"already have {long_count} longs in batch")
+        else:
+            if short_count < MAX_SAME_DIRECTION:
+                capped.append(sig)
+                short_count += 1
+            else:
+                print(f"  [DIR CAP] {sig.symbol} SHORT dropped — "
+                      f"already have {short_count} shorts in batch")
+
+    # Final top-N slice
+    final = capped[:TOP_N_SIGNALS]
+
+    if not final:
         print("  [SCAN] No signals this round.")
         return
 
+    # ── Fetch current prices in one batch call ───────────────────────────────
+    all_mids = fetch_all_mids()
+
     print(f"\n  [TOP {TOP_N_SIGNALS}] Sending best signals:")
-    for sig in signals:
-        msg_id = send_telegram_get_id(format_signal_message(sig))
+    for sig in final:
+        # Attach live price to signal details so format_signal_message can use it
+        coin      = hl_coin(sig.symbol)
+        cur_price = all_mids.get(coin)
+        if cur_price is not None:
+            dist_pct = abs(cur_price - sig.exact_entry) / cur_price * 100
+            sig.details["current_price"]    = cur_price
+            sig.details["entry_dist_pct"]   = dist_pct
+
+        msg    = format_signal_message(sig)
+        msg_id = send_telegram_get_id(msg)
         mark_fired(sig)
         if msg_id:
             track_active_signal(sig, msg_id)
