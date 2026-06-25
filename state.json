@@ -46,7 +46,7 @@
         "15M_OB_FVG"
       ],
       "message_id": 895,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782416754.8398042
