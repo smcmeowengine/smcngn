@@ -1,4 +1,3 @@
-
 """
 SMC Signal Engine — Combo 1 + Combo 2 + Fibonacci Confluence
 =============================================================
@@ -13,7 +12,7 @@ Alerts     : Telegram (HTML)
 Signals are PREDICTIVE — exact limit entry price set BEFORE price arrives.
 """
 
-import os, time, math, threading, requests, random
+import os, time, math, threading, requests, random, json, pathlib
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
@@ -906,30 +905,65 @@ def run_scan() -> None:
               f"{sig.signal_grade} | Entry: {fmt_price(sig.exact_entry)}")
         time.sleep(0.5)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STATE PERSISTENCE  (cooldown memory across GitHub Actions runs)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+STATE_FILE = pathlib.Path("state.json")
+
+def load_state() -> None:
+    """Load _fired_signals from state.json (written by previous run)."""
+    global _fired_signals
+    if STATE_FILE.exists():
+        try:
+            data = json.loads(STATE_FILE.read_text())
+            # Values are Unix timestamps (floats)
+            _fired_signals = {k: float(v) for k, v in data.items()}
+            print(f"  [STATE] Loaded {len(_fired_signals)} cooldown entries from {STATE_FILE}")
+        except Exception as e:
+            print(f"  [STATE] Could not load state.json: {e} — starting fresh")
+            _fired_signals = {}
+    else:
+        print("  [STATE] No state.json found — starting fresh")
+        _fired_signals = {}
+
+def save_state() -> None:
+    """Persist _fired_signals to state.json for the next run."""
+    try:
+        STATE_FILE.write_text(json.dumps(_fired_signals, indent=2))
+        print(f"  [STATE] Saved {len(_fired_signals)} cooldown entries to {STATE_FILE}")
+    except Exception as e:
+        print(f"  [STATE] Could not save state.json: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAIN  —  single scan, then exit
+#          GitHub Actions cron (every 15 min) replaces the while True loop
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v2.0")
+    print("  SMC Signal Engine v2.0  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print("  Timeframes: 4H / 1H / 15M")
+    print("  Scheduled via GitHub Actions cron every 15 minutes")
     print("=" * 60)
 
-    send_telegram(
-        "🤖 <b>SMC Signal Engine v2.0 Started</b>\n"
-        "Combos: HTF OB+FVG+MSB + Liq Sweep + Fibonacci\n"
-        f"Timeframes: 4H → 1H → 15M\n"
-        f"Watchlist: {len(WATCHLIST)} symbols\n"
-        "Signals include <b>exact limit entry price</b> + TP1/TP2 + Fib levels."
-    )
+    # Restore cooldown memory from the previous run
+    load_state()
 
-    while True:
-        try:
-            run_scan()
-        except Exception as e:
-            print(f"[MAIN ERROR] {e}")
-            send_telegram(f"⚠️ SMC Engine error: {e}")
-        print(f"  [SLEEP] Next scan in {SCAN_INTERVAL_S // 60} min...")
-        time.sleep(SCAN_INTERVAL_S)
+    # Run one scan
+    try:
+        run_scan()
+    except Exception as e:
+        print(f"[MAIN ERROR] {e}")
+        send_telegram(f"⚠️ SMC Engine error: {e}")
+
+    # Persist cooldown memory for the next run
+    save_state()
+
+    print("  [DONE] Scan complete. Exiting.")
 
 if __name__ == "__main__":
     main()
