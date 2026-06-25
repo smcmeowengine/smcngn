@@ -41,6 +41,37 @@ N_15M           = 200
 N_1H            = 150
 N_4H            = 100
 
+# ── SESSION FILTER (High priority upgrade) ────────────────────────────────────
+# Only trade during London (07:00–12:00 UTC) and New York (13:00–20:00 UTC)
+SESSION_FILTER_ENABLED = True
+LONDON_OPEN_H  = 7
+LONDON_CLOSE_H = 12
+NY_OPEN_H      = 13
+NY_CLOSE_H     = 20
+
+# ── VOLUME CONFIRMATION (High priority upgrade) ───────────────────────────────
+# Require sweep candle volume > N× average volume to filter fake sweeps
+VOLUME_GATE_ENABLED     = True
+VOLUME_GATE_MULTIPLIER  = 1.4   # sweep volume must be > 1.4× the 20-bar avg
+
+# ── BTC REGIME FILTER (Medium priority upgrade) ───────────────────────────────
+# Block altcoin longs when BTC is in a confirmed bear regime
+BTC_REGIME_FILTER_ENABLED = True
+BTC_SYMBOL                = "BTCUSDT"
+BTC_BEAR_EMA_FAST         = 21
+BTC_BEAR_EMA_SLOW         = 50
+
+# ── MINIMUM TP2 R:R GATE (Medium priority upgrade) ───────────────────────────
+# Drop signals whose TP2 reward-to-risk is below 1:3
+TP2_MIN_RR                = 3.0
+
+# ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
+# Look back N bars for a sweep cluster, not just the last closed bar
+SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
+
+# ── WIN RATE MEMORY (Later upgrade) ──────────────────────────────────────────
+WIN_RATE_FILE = pathlib.Path("win_rate.json")
+
 # ── SMC PARAMETERS ───────────────────────────────────────────────────────────
 OB_LOOKBACK        = 50
 OB_MIN_MOVE_ATR    = 1.5
@@ -225,6 +256,101 @@ def calc_ema(values: list[float], period: int) -> list[float]:
     for v in values[period:]:
         out.append(v * k + out[-1] * (1 - k))
     return [0.0] * (period - 1) + out
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SESSION FILTER  (High priority upgrade)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def is_active_session() -> bool:
+    """
+    Return True if current UTC hour falls inside London or New York sessions.
+    London : 07:00–12:00 UTC
+    New York: 13:00–20:00 UTC
+    """
+    if not SESSION_FILTER_ENABLED:
+        return True
+    hour = datetime.now(timezone.utc).hour
+    in_london = LONDON_OPEN_H <= hour < LONDON_CLOSE_H
+    in_ny     = NY_OPEN_H     <= hour < NY_CLOSE_H
+    return in_london or in_ny
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BTC REGIME FILTER  (Medium priority upgrade)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_btc_regime_cache: dict = {}   # {"regime": "bull"|"bear"|"neutral", "ts": float}
+_BTC_REGIME_TTL_S = 60 * 30   # recheck every 30 minutes
+
+
+def get_btc_regime() -> str:
+    """
+    Return "bull", "bear", or "neutral" based on BTC 4H EMA21 vs EMA50.
+    Cached for 30 minutes to avoid extra API calls per symbol scan.
+    """
+    if not BTC_REGIME_FILTER_ENABLED:
+        return "bull"   # filter disabled → treat as always bullish (don't block)
+
+    now = time.time()
+    if _btc_regime_cache and (now - _btc_regime_cache.get("ts", 0)) < _BTC_REGIME_TTL_S:
+        return _btc_regime_cache["regime"]
+
+    try:
+        candles = get_candles(BTC_SYMBOL, "4h", 60)
+        if len(candles) < BTC_BEAR_EMA_SLOW + 5:
+            return "neutral"
+        closes  = [c["c"] for c in candles]
+        ema_fast = calc_ema(closes, BTC_BEAR_EMA_FAST)
+        ema_slow = calc_ema(closes, BTC_BEAR_EMA_SLOW)
+        cur      = closes[-1]
+        fast, slow = ema_fast[-1], ema_slow[-1]
+        if cur > fast > slow:
+            regime = "bull"
+        elif cur < fast < slow:
+            regime = "bear"
+        else:
+            regime = "neutral"
+        _btc_regime_cache["regime"] = regime
+        _btc_regime_cache["ts"]     = now
+        print(f"  [BTC REGIME] {regime.upper()} | price={fmt_price(cur)} "
+              f"EMA{BTC_BEAR_EMA_FAST}={fmt_price(fast)} EMA{BTC_BEAR_EMA_SLOW}={fmt_price(slow)}")
+        return regime
+    except Exception as e:
+        print(f"  [BTC REGIME ERROR] {e}")
+        return "neutral"
+
+
+def btc_regime_blocks_long() -> bool:
+    """Return True when BTC is bearish and altcoin longs should be blocked."""
+    return BTC_REGIME_FILTER_ENABLED and get_btc_regime() == "bear"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VOLUME CONFIRMATION GATE  (High priority upgrade)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def calc_avg_volume(candles: list[dict], period: int = 20) -> float:
+    vols = [c["v"] for c in candles[-period:] if c["v"] > 0]
+    return sum(vols) / len(vols) if vols else 0.0
+
+
+def sweep_has_volume_confirmation(candles: list[dict], sweep_bar_idx: int) -> bool:
+    """
+    Check that the sweep candle's volume exceeds VOLUME_GATE_MULTIPLIER × 20-bar avg.
+    sweep_bar_idx is the absolute index into candles.
+    """
+    if not VOLUME_GATE_ENABLED:
+        return True
+    if sweep_bar_idx < 20:
+        return True   # not enough history to judge — allow through
+    avg_vol  = calc_avg_volume(candles[:sweep_bar_idx], period=20)
+    sweep_vol = candles[sweep_bar_idx]["v"]
+    confirmed = sweep_vol >= avg_vol * VOLUME_GATE_MULTIPLIER
+    if not confirmed:
+        print(f"    [VOL GATE] sweep vol={sweep_vol:.2f} < "
+              f"{VOLUME_GATE_MULTIPLIER}× avg={avg_vol:.2f} — rejected")
+    return confirmed
+
 
 def is_swing_high(candles: list[dict], i: int, n: int) -> bool:
     if i < n or i >= len(candles) - n:
@@ -471,23 +597,54 @@ def find_equal_levels(candles: list[dict], direction: str) -> list[float]:
     return sorted(set(round(l, 8) for l in levels))
 
 def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | None:
+    """
+    Detect a liquidity sweep on the 1H timeframe.
+
+    Multi-bar sweep detection (Medium upgrade): check the last SWEEP_MULTIBAR_LOOKBACK
+    closed bars, not just the most recent one. This catches sweeps that closed 1-2
+    bars ago and prevents missed signals.
+
+    Volume confirmation gate (High upgrade): the sweep candle's volume must be at
+    least VOLUME_GATE_MULTIPLIER × the 20-bar average volume. Low-volume wicks
+    into equal lows/highs are fake sweeps — we filter them out here.
+    """
     if len(candles_1h) < SWEEP_LOOKBACK + 2:
         return None
-    cur   = candles_1h[-1]
-    prior = candles_1h[:-2]
+
+    prior  = candles_1h[:-SWEEP_MULTIBAR_LOOKBACK - 1]
     levels = find_equal_levels(prior, direction)
     if not levels:
         return None
-    if direction == "long":
-        for lvl in levels:
-            if cur["l"] < lvl and cur["c"] > lvl:
-                return {"level": lvl, "wick_depth": lvl - cur["l"],
-                        "direction": "long", "sweep_bar": len(candles_1h) - 1}
-    else:
-        for lvl in levels:
-            if cur["h"] > lvl and cur["c"] < lvl:
-                return {"level": lvl, "wick_height": cur["h"] - lvl,
-                        "direction": "short", "sweep_bar": len(candles_1h) - 1}
+
+    # Check the last SWEEP_MULTIBAR_LOOKBACK bars (most recent first)
+    n = len(candles_1h)
+    for offset in range(1, SWEEP_MULTIBAR_LOOKBACK + 1):
+        bar_idx = n - offset
+        if bar_idx < 20:
+            continue
+        bar = candles_1h[bar_idx]
+
+        if direction == "long":
+            for lvl in levels:
+                if bar["l"] < lvl and bar["c"] > lvl:
+                    # Volume gate
+                    if not sweep_has_volume_confirmation(candles_1h, bar_idx):
+                        continue
+                    return {"level": lvl,
+                            "wick_depth": lvl - bar["l"],
+                            "direction": "long",
+                            "sweep_bar": bar_idx,
+                            "bars_ago": offset}
+        else:
+            for lvl in levels:
+                if bar["h"] > lvl and bar["c"] < lvl:
+                    if not sweep_has_volume_confirmation(candles_1h, bar_idx):
+                        continue
+                    return {"level": lvl,
+                            "wick_height": bar["h"] - lvl,
+                            "direction": "short",
+                            "sweep_bar": bar_idx,
+                            "bars_ago": offset}
     return None
 
 
@@ -938,13 +1095,30 @@ def fetch_all_mids() -> dict[str, float]:
 def run_scan() -> None:
     print(f"\n[SCAN] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
           f"— {len(WATCHLIST)} symbols")
+
+    # ── Session Filter (High priority upgrade) ────────────────────────────────
+    if SESSION_FILTER_ENABLED and not is_active_session():
+        hour = datetime.now(timezone.utc).hour
+        print(f"  [SESSION] Outside London/NY hours (UTC hour={hour}) — scan skipped.")
+        return
+
+    # ── BTC Regime (Medium priority upgrade) — fetch once for whole scan ─────
+    btc_bear = btc_regime_blocks_long()
+    if btc_bear:
+        print("  [BTC REGIME] Bear market detected — altcoin LONGS will be blocked.")
+
     signals = []
     for symbol in WATCHLIST:
         sig = scan_symbol(symbol)
-        if sig and not is_duplicate(sig):
-            signals.append(sig)
-            print(f"  ✅ {symbol} {sig.direction.upper()} | {sig.signal_grade} "
-                  f"| {sig.confluence}/8 | {sig.combos_hit}")
+        if sig:
+            # BTC regime: block altcoin longs (allow BTC itself through)
+            if btc_bear and sig.direction == "long" and symbol != BTC_SYMBOL:
+                print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
+                continue
+            if not is_duplicate(sig):
+                signals.append(sig)
+                print(f"  ✅ {symbol} {sig.direction.upper()} | {sig.signal_grade} "
+                      f"| {sig.confluence}/8 | {sig.combos_hit}")
         else:
             print(f"  —  {symbol} no signal")
         time.sleep(0.25)
@@ -952,24 +1126,25 @@ def run_scan() -> None:
     # ── Sort by confluence desc ──────────────────────────────────────────────
     signals.sort(key=lambda s: s.confluence, reverse=True)
 
-    # ── R:R Sanity Check (filter before direction cap) ───────────────────────
-    # Drop signals whose reward-to-risk < 1.5.  Do NOT mark_fired so the
-    # symbol can generate a fresh signal next scan if conditions improve.
+    # ── R:R Sanity Check — TP1 ≥ 1.5, TP2 ≥ 3.0 (upgraded gate) ────────────
     rr_passed = []
     for sig in signals:
-        risk   = abs(sig.exact_entry - sig.stop_loss)
-        reward = abs(sig.take_profit_1 - sig.exact_entry)
-        rr     = reward / risk if risk > 0 else 0.0
-        if rr < 1.5:
+        risk    = abs(sig.exact_entry - sig.stop_loss)
+        if risk == 0:
+            continue
+        rr_tp1  = abs(sig.take_profit_1 - sig.exact_entry) / risk
+        rr_tp2  = abs(sig.take_profit_2 - sig.exact_entry) / risk
+        if rr_tp1 < 1.5:
             print(f"  [RR FILTER] {sig.symbol} {sig.direction.upper()} dropped "
-                  f"— RR={rr:.2f} < 1.5 (entry={fmt_price(sig.exact_entry)} "
-                  f"sl={fmt_price(sig.stop_loss)} tp1={fmt_price(sig.take_profit_1)})")
-        else:
-            rr_passed.append(sig)
+                  f"— TP1 RR={rr_tp1:.2f} < 1.5")
+            continue
+        if rr_tp2 < TP2_MIN_RR:
+            print(f"  [TP2 RR FILTER] {sig.symbol} {sig.direction.upper()} dropped "
+                  f"— TP2 RR={rr_tp2:.2f} < {TP2_MIN_RR} (1:{TP2_MIN_RR:.0f} gate)")
+            continue
+        rr_passed.append(sig)
 
     # ── Direction Cap (correlation guard) ────────────────────────────────────
-    # Allow at most MAX_SAME_DIRECTION longs and MAX_SAME_DIRECTION shorts in
-    # the final batch.  Already sorted by confluence, so we drop tail signals.
     capped: list[SMCSignal] = []
     long_count = short_count = 0
     for sig in rr_passed:
@@ -1000,7 +1175,6 @@ def run_scan() -> None:
 
     print(f"\n  [TOP {TOP_N_SIGNALS}] Sending best signals:")
     for sig in final:
-        # Attach live price to signal details so format_signal_message can use it
         coin      = hl_coin(sig.symbol)
         cur_price = all_mids.get(coin)
         if cur_price is not None:
@@ -1104,8 +1278,9 @@ def track_active_signal(sig: SMCSignal, message_id: int) -> None:
         "stop_loss":       sig.stop_loss,
         "take_profit_1":   sig.take_profit_1,
         "take_profit_2":   sig.take_profit_2,
+        "combos_hit":      sig.combos_hit,
         "message_id":      message_id,
-        "entered":         False,   # True once limit order is confirmed filled
+        "entered":         False,
         "tp1_hit":         False,
         "resolved":        False,
         "sent_at":         time.time(),
@@ -1221,6 +1396,7 @@ def check_reactions() -> None:
 
         if sl_hit and not s["tp1_hit"]:
             react_to_message(msg_id, "😭")
+            record_outcome(s["symbol"], s.get("combos_hit", []), "loss")
             s["resolved"] = True
             to_drop.append(key)
 
@@ -1229,17 +1405,109 @@ def check_reactions() -> None:
                 react_to_message(msg_id, "🔥")
                 s["tp1_hit"] = True
             react_to_message(msg_id, "🏆")
+            record_outcome(s["symbol"], s.get("combos_hit", []), "win")
             s["resolved"] = True
             to_drop.append(key)
 
         elif tp1_hit and not s["tp1_hit"]:
             react_to_message(msg_id, "🔥")
+            record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
             s["tp1_hit"] = True
 
         time.sleep(0.2)
 
     for key in to_drop:
         _active_signals.pop(key, None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WIN RATE MEMORY  (Later upgrade — self-improving system)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Tracks outcomes per symbol and per combo set so the engine can surface which
+# setups have the highest historical win rate.  Stored in win_rate.json.
+#
+# Schema:
+#   {
+#     "by_symbol": { "BTCUSDT": {"wins": 3, "losses": 1, "tp1s": 2} },
+#     "by_combo":  { "HTF_BIAS+4H_OB+FVG": {"wins": 5, "losses": 2} },
+#     "total":     {"wins": 8, "losses": 3, "tp1s": 2}
+#   }
+
+_win_rate_data: dict = {"by_symbol": {}, "by_combo": {}, "total": {"wins": 0, "losses": 0, "tp1s": 0}}
+
+
+def load_win_rate() -> None:
+    global _win_rate_data
+    if WIN_RATE_FILE.exists():
+        try:
+            _win_rate_data = json.loads(WIN_RATE_FILE.read_text())
+            total = _win_rate_data.get("total", {})
+            print(f"  [WIN RATE] Loaded — W:{total.get('wins',0)} "
+                  f"L:{total.get('losses',0)} TP1:{total.get('tp1s',0)}")
+        except Exception as e:
+            print(f"  [WIN RATE] Load error: {e} — starting fresh")
+
+
+def save_win_rate() -> None:
+    try:
+        WIN_RATE_FILE.write_text(json.dumps(_win_rate_data, indent=2))
+    except Exception as e:
+        print(f"  [WIN RATE] Save error: {e}")
+
+
+def record_outcome(symbol: str, combos: list, outcome: str) -> None:
+    """
+    outcome: "win" (TP2 hit) | "tp1" (TP1 hit, not TP2) | "loss" (SL hit)
+    """
+    combo_key = "+".join(sorted(combos)) if combos else "unknown"
+
+    for bucket, key in [("by_symbol", symbol), ("by_combo", combo_key)]:
+        if key not in _win_rate_data[bucket]:
+            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0}
+        entry = _win_rate_data[bucket][key]
+        if outcome == "win":
+            entry["wins"] += 1
+        elif outcome == "loss":
+            entry["losses"] += 1
+        elif outcome == "tp1":
+            entry["tp1s"] += 1
+
+    t = _win_rate_data["total"]
+    if outcome == "win":
+        t["wins"] += 1
+    elif outcome == "loss":
+        t["losses"] += 1
+    elif outcome == "tp1":
+        t["tp1s"] += 1
+
+    total_trades = t["wins"] + t["losses"]
+    wr = (t["wins"] / total_trades * 100) if total_trades else 0
+    print(f"  [WIN RATE] {symbol} → {outcome.upper()} | "
+          f"Overall: {t['wins']}W / {t['losses']}L = {wr:.1f}% WR")
+    save_win_rate()
+
+
+def get_win_rate_summary() -> str:
+    """Return a short human-readable win rate summary for Telegram."""
+    t = _win_rate_data.get("total", {})
+    wins, losses = t.get("wins", 0), t.get("losses", 0)
+    tp1s         = t.get("tp1s", 0)
+    total        = wins + losses
+    if total == 0:
+        return "No closed trades yet."
+    wr = wins / total * 100
+    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s}"]
+    # Top 3 symbols by win rate (min 2 trades)
+    by_sym = _win_rate_data.get("by_symbol", {})
+    ranked = [(s, d) for s, d in by_sym.items() if d["wins"] + d["losses"] >= 2]
+    ranked.sort(key=lambda x: x[1]["wins"] / (x[1]["wins"] + x[1]["losses"]), reverse=True)
+    if ranked:
+        lines.append("Top symbols:")
+        for sym, d in ranked[:3]:
+            n = d["wins"] + d["losses"]
+            lines.append(f"  {sym}: {d['wins']}/{n} ({d['wins']/n*100:.0f}%)")
+    return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1326,14 +1594,20 @@ def save_state() -> None:
 
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v2.0  [single-scan mode]")
+    print("  SMC Signal Engine v2.1  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
+    print("  Upgrades: Session filter | Volume gate | BTC regime")
+    print("            TP2 1:3 gate | Multi-bar sweep | Win rate memory")
     print("  Timeframes: 4H / 1H / 15M")
     print("=" * 60)
 
     load_state()
+    load_win_rate()
+
+    # ── Print win rate summary ───────────────────────────────────────────────
+    print(f"\n{get_win_rate_summary()}")
 
     # ── Step 1: Check reactions on previously sent signals ───────────────────
     if _active_signals:
