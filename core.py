@@ -1332,7 +1332,7 @@ def check_reactions() -> None:
         tp2        = s["take_profit_2"]
         msg_id     = s["message_id"]
 
-        # ── Phase 1: Check if price has entered the entry zone range ────────
+        # ── Phase 1: Check if price has reached the exact limit entry ────────
         if not s["entered"]:
 
             # Entry expiration — not filled within 2 hours → delete and drop silently
