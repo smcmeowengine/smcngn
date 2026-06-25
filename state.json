@@ -44,7 +44,7 @@
       "take_profit_1": 0.6870892714285713,
       "take_profit_2": 0.68655,
       "message_id": 808,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782388863.3987665
@@ -93,21 +93,6 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782389767.4990475
-    },
-    "BNBUSDT_short": {
-      "symbol": "BNBUSDT",
-      "direction": "short",
-      "exact_entry": 564.065,
-      "entry_zone_high": 565.2,
-      "entry_zone_low": 563.75,
-      "stop_loss": 566.6235714285715,
-      "take_profit_1": 558.9478571428572,
-      "take_profit_2": 556.3892857142857,
-      "message_id": 813,
-      "entered": true,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782389768.5068448
     },
     "APTUSDT_short": {
       "symbol": "APTUSDT",
