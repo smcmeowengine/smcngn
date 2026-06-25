@@ -980,7 +980,8 @@ def react_to_message(message_id: int, emoji: str) -> None:
 # Signals are removed from tracking after 7 days (max trade duration assumed).
 
 _active_signals: dict[str, dict] = {}
-ACTIVE_SIGNAL_TTL_S = 7 * 24 * 60 * 60   # 7 days
+ACTIVE_SIGNAL_TTL_S   = 7 * 24 * 60 * 60   # 7 days  — max trade duration
+ENTRY_EXPIRY_S        = 2 * 60 * 60         # 2 hours — if entry not hit, signal expires
 
 
 def track_active_signal(sig: SMCSignal, message_id: int) -> None:
@@ -995,7 +996,7 @@ def track_active_signal(sig: SMCSignal, message_id: int) -> None:
         "take_profit_1":   sig.take_profit_1,
         "take_profit_2":   sig.take_profit_2,
         "message_id":      message_id,
-        "entered":         False,   # True once price touches the entry zone
+        "entered":         False,   # True once limit order is confirmed filled
         "tp1_hit":         False,
         "resolved":        False,
         "sent_at":         time.time(),
@@ -1059,16 +1060,41 @@ def check_reactions() -> None:
 
         # ── Phase 1: Check if price has reached the exact limit entry ────────
         if not s["entered"]:
-            filled = (direction == "long"  and price <= entry) or \
-                     (direction == "short" and price >= entry)
-            if filled:
+
+            # Entry expiration — if not filled within 8 hours, cancel silently
+            if now - s["sent_at"] > ENTRY_EXPIRY_S:
+                print(f"  [REACT] {key} — entry expired (not filled in 2h), dropping")
+                s["resolved"] = True
+                to_drop.append(key)
+                continue
+
+            # Confirm fill only if price is AT the entry level but NOT already
+            # past the SL — guards against "price blew through entry into SL"
+            # in the same candle without actually filling the limit order cleanly.
+            if direction == "long":
+                at_entry   = price <= entry
+                past_sl    = price <= sl
+            else:
+                at_entry   = price >= entry
+                past_sl    = price >= sl
+
+            if at_entry and not past_sl:
                 s["entered"] = True
                 print(f"  [REACT] {key} — limit order filled at {fmt_price(price)} "
                       f"(exact entry: {fmt_price(entry)})")
+            elif at_entry and past_sl:
+                # Price blew past both entry and SL — order would have filled
+                # and immediately stopped out; treat as a loss
+                print(f"  [REACT] {key} — price blew past entry+SL "
+                      f"({fmt_price(price)}) — marking 😭")
+                react_to_message(msg_id, "😭")
+                s["resolved"] = True
+                to_drop.append(key)
+                continue
             else:
                 print(f"  [REACT WAIT] {key} | price={fmt_price(price)} "
                       f"| waiting for exact entry {fmt_price(entry)}")
-                continue   # limit order not filled yet — skip TP/SL check
+                continue   # limit order not filled yet
 
         # ── Phase 2: Monitor TP / SL ──────────────────────────────────────────
         print(f"  [REACT CHECK] {key} | price={fmt_price(price)} "
