@@ -5,7 +5,9 @@
     "ADAUSDT_short": 1782405950.957068,
     "SUIUSDT_short": 1782405952.061195,
     "HYPEUSDT_short": 1782406860.97586,
-    "ONDOUSDT_short": 1782406861.9976556
+    "ONDOUSDT_short": 1782406861.9976556,
+    "BCHUSDT_short": 1782407753.015998,
+    "PENDLEUSDT_short": 1782407754.079303
   },
   "active_signals": {
     "NEARUSDT_short": {
@@ -143,6 +145,50 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782406861.9976606
+    },
+    "BCHUSDT_short": {
+      "symbol": "BCHUSDT",
+      "direction": "short",
+      "exact_entry": 194.8543,
+      "entry_zone_high": 195.33,
+      "entry_zone_low": 194.62,
+      "stop_loss": 197.8957142857143,
+      "take_profit_1": 188.7714714285714,
+      "take_profit_2": 185.7300571428571,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 884,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782407753.0160038
+    },
+    "PENDLEUSDT_short": {
+      "symbol": "PENDLEUSDT",
+      "direction": "short",
+      "exact_entry": 1.283786,
+      "entry_zone_high": 1.2866,
+      "entry_zone_low": 1.2824,
+      "stop_loss": 1.3068499999999998,
+      "take_profit_1": 1.2376580000000006,
+      "take_profit_2": 1.2145940000000008,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 885,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782407754.0793087
     }
   }
 }
