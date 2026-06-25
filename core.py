@@ -94,7 +94,7 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is now 7 (added Fibonacci layer)
-MIN_CONFLUENCE_SCORE  = 5
+MIN_CONFLUENCE_SCORE  = 6
 STRONG_SIGNAL_SCORE   = 5
 APLUS_SIGNAL_SCORE    = 6
 
@@ -956,18 +956,8 @@ def format_signal_message(sig: SMCSignal) -> str:
     dir_label   = "LONG" if sig.direction == "long" else "SHORT"
     dir_marker  = "▲" if sig.direction == "long" else "▼"
 
-    # Combo labels (no emojis)
-    combo_labels = {
-        "HTF_BIAS":   "HTF Bias (4H)",
-        "4H_OB":      "4H Order Block",
-        "FVG":        "FVG (Combo 1)",
-        "LIQ_SWEEP":  "Liquidity Sweep (Combo 2)",
-        "15M_MSB":    "15M MSB Confirmed",
-        "15M_OB_FVG": "15M OB/FVG Entry",
-        "FIB_GOLDEN": "Fib Golden Zone 0.618–0.786",
-        "FIB_LEVEL":  f"Fib Level ({sig.details.get('fib_zone', '')})",
-    }
-    combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
+    # Combo display removed per request – only core signal info will be shown
+    # combo_labels and combo_str are omitted to simplify the Telegram message
 
     # Fibonacci section (compact, no emojis)
     fib_section = ""
@@ -1013,8 +1003,8 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"\n<b>Confluence:</b> {sig.confluence}/{max_score}\n"
-        f"{combo_str}\n"
+        # Confluence score line removed per request (combo list omitted)
+        # No combo_str included
     )
     return msg
 
@@ -1355,17 +1345,15 @@ def check_reactions() -> None:
                 to_drop.append(key)
                 continue
 
-            if direction == "long":
-                at_entry = price <= entry
-                past_sl  = price <= sl
-            else:
-                at_entry = price >= entry
-                past_sl  = price >= sl
+            # Determine if price has entered the entry zone range
+            zone_low = s["entry_zone_low"]
+            zone_high = s["entry_zone_high"]
+            at_entry = zone_low <= price <= zone_high
+            past_sl = price <= sl if direction == "long" else price >= sl
 
             if at_entry and past_sl:
-                # Price blew past both entry and SL — limit order never filled cleanly
-                # Not a real trade — delete message and clear cooldown
-                print(f"  [REACT] {key} — price blew past entry+SL "
+                # Price blew past both entry zone and SL — treat as invalid fill
+                print(f"  [REACT] {key} — price blew past entry zone+SL "
                       f"({fmt_price(price)}) — not a valid fill, deleting message")
                 delete_message(msg_id)
                 _fired_signals.pop(key, None)   # clear cooldown
@@ -1374,12 +1362,12 @@ def check_reactions() -> None:
                 continue
             elif at_entry:
                 s["entered"] = True
-                print(f"  [REACT] {key} — limit order filled at {fmt_price(price)} "
-                      f"(exact entry: {fmt_price(entry)})")
+                print(f"  [REACT] {key} — entered entry zone at {fmt_price(price)} "
+                      f"(zone {fmt_price(zone_low)}–{fmt_price(zone_high)})")
             else:
                 print(f"  [REACT WAIT] {key} | price={fmt_price(price)} "
-                      f"| waiting for exact entry {fmt_price(entry)}")
-                continue   # limit order not filled yet
+                      f"| waiting for price within entry zone {fmt_price(zone_low)}–{fmt_price(zone_high)}")
+                continue   # entry zone not hit yet
 
         # ── Phase 2: Monitor TP / SL ──────────────────────────────────────────
         print(f"  [REACT CHECK] {key} | price={fmt_price(price)} "
