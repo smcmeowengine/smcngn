@@ -960,6 +960,19 @@ def react_to_message(message_id: int, emoji: str) -> None:
     except Exception as e:
         print(f"  [REACT ERROR] msg {message_id}: {e}")
 
+def delete_message(message_id: int) -> None:
+    """Delete a Telegram message (used for expired/invalid signals)."""
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteMessage"
+    try:
+        r = requests.post(url, json={
+            "chat_id":    TG_CHAT_ID,
+            "message_id": message_id,
+        }, timeout=10)
+        r.raise_for_status()
+        print(f"  [DELETE] msg {message_id} removed")
+    except Exception as e:
+        print(f"  [DELETE ERROR] msg {message_id}: {e}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ACTIVE SIGNAL TRACKING  (for reaction feature)
@@ -1061,36 +1074,37 @@ def check_reactions() -> None:
         # ── Phase 1: Check if price has reached the exact limit entry ────────
         if not s["entered"]:
 
-            # Entry expiration — if not filled within 8 hours, cancel silently
+            # Entry expiration — not filled within 2 hours → delete and drop silently
+            # Not a win or loss, cooldown cleared so symbol can signal again
             if now - s["sent_at"] > ENTRY_EXPIRY_S:
-                print(f"  [REACT] {key} — entry expired (not filled in 2h), dropping")
+                print(f"  [REACT] {key} — entry expired (not filled in 2h), deleting message")
+                delete_message(msg_id)
+                _fired_signals.pop(key, None)   # clear cooldown
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
 
-            # Confirm fill only if price is AT the entry level but NOT already
-            # past the SL — guards against "price blew through entry into SL"
-            # in the same candle without actually filling the limit order cleanly.
             if direction == "long":
-                at_entry   = price <= entry
-                past_sl    = price <= sl
+                at_entry = price <= entry
+                past_sl  = price <= sl
             else:
-                at_entry   = price >= entry
-                past_sl    = price >= sl
+                at_entry = price >= entry
+                past_sl  = price >= sl
 
-            if at_entry and not past_sl:
+            if at_entry and past_sl:
+                # Price blew past both entry and SL — limit order never filled cleanly
+                # Not a real trade — delete message and clear cooldown
+                print(f"  [REACT] {key} — price blew past entry+SL "
+                      f"({fmt_price(price)}) — not a valid fill, deleting message")
+                delete_message(msg_id)
+                _fired_signals.pop(key, None)   # clear cooldown
+                s["resolved"] = True
+                to_drop.append(key)
+                continue
+            elif at_entry:
                 s["entered"] = True
                 print(f"  [REACT] {key} — limit order filled at {fmt_price(price)} "
                       f"(exact entry: {fmt_price(entry)})")
-            elif at_entry and past_sl:
-                # Price blew past both entry and SL — order would have filled
-                # and immediately stopped out; treat as a loss
-                print(f"  [REACT] {key} — price blew past entry+SL "
-                      f"({fmt_price(price)}) — marking 😭")
-                react_to_message(msg_id, "😭")
-                s["resolved"] = True
-                to_drop.append(key)
-                continue
             else:
                 print(f"  [REACT WAIT] {key} | price={fmt_price(price)} "
                       f"| waiting for exact entry {fmt_price(entry)}")
