@@ -94,7 +94,7 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is now 7 (added Fibonacci layer)
-MIN_CONFLUENCE_SCORE  = 5
+MIN_CONFLUENCE_SCORE  = 6
 STRONG_SIGNAL_SCORE   = 5
 APLUS_SIGNAL_SCORE    = 6
 
@@ -1013,8 +1013,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"\n<b>Confluence:</b> {sig.confluence}/{max_score}\n"
-        f"{combo_str}\n"
+        f"\n<i>SMC Signal Engine v3 | Min confluence 6/{max_score}</i>\n"
     )
     return msg
 
@@ -1342,13 +1341,13 @@ def check_reactions() -> None:
         tp2        = s["take_profit_2"]
         msg_id     = s["message_id"]
 
-        # ── Phase 1: Check if price has reached the exact limit entry ────────
+        # ── Phase 1: Check if price has touched the entry zone ───────────────
         if not s["entered"]:
 
-            # Entry expiration — not filled within 2 hours → delete and drop silently
+            # Entry expiration — zone not touched within 2 hours → delete and drop silently
             # Not a win or loss, cooldown cleared so symbol can signal again
             if now - s["sent_at"] > ENTRY_EXPIRY_S:
-                print(f"  [REACT] {key} — entry expired (not filled in 2h), deleting message")
+                print(f"  [REACT] {key} — entry expired (zone not touched in 2h), deleting message")
                 delete_message(msg_id)
                 _fired_signals.pop(key, None)   # clear cooldown
                 s["resolved"] = True
@@ -1356,30 +1355,31 @@ def check_reactions() -> None:
                 continue
 
             if direction == "long":
-                at_entry = price <= entry
-                past_sl  = price <= sl
+                # Zone touched when price drops into the zone (price <= zone_high)
+                in_zone = price <= zone_high
+                past_sl = price <= sl
             else:
-                at_entry = price >= entry
-                past_sl  = price >= sl
+                # Zone touched when price rises into the zone (price >= zone_low)
+                in_zone = price >= zone_low
+                past_sl = price >= sl
 
-            if at_entry and past_sl:
-                # Price blew past both entry and SL — limit order never filled cleanly
-                # Not a real trade — delete message and clear cooldown
-                print(f"  [REACT] {key} — price blew past entry+SL "
+            if in_zone and past_sl:
+                # Price blew straight through zone and hit SL — skip as invalid fill
+                print(f"  [REACT] {key} — price blew through zone+SL "
                       f"({fmt_price(price)}) — not a valid fill, deleting message")
                 delete_message(msg_id)
                 _fired_signals.pop(key, None)   # clear cooldown
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
-            elif at_entry:
+            elif in_zone:
                 s["entered"] = True
-                print(f"  [REACT] {key} — limit order filled at {fmt_price(price)} "
-                      f"(exact entry: {fmt_price(entry)})")
+                print(f"  [REACT] {key} — entry zone touched at {fmt_price(price)} "
+                      f"(zone: {fmt_price(zone_low)}–{fmt_price(zone_high)})")
             else:
                 print(f"  [REACT WAIT] {key} | price={fmt_price(price)} "
-                      f"| waiting for exact entry {fmt_price(entry)}")
-                continue   # limit order not filled yet
+                      f"| waiting for zone {fmt_price(zone_low)}–{fmt_price(zone_high)}")
+                continue   # zone not touched yet
 
         # ── Phase 2: Monitor TP / SL ──────────────────────────────────────────
         print(f"  [REACT CHECK] {key} | price={fmt_price(price)} "
