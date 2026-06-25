@@ -1,8 +1,5 @@
 {
   "fired_signals": {
-    "NEARUSDT_short": 1782389765.4456563,
-    "PENGUUSDT_short": 1782389766.4852498,
-    "BNBUSDT_short": 1782389768.5068393,
     "ETHUSDT_short": 1782397865.8783176,
     "ADAUSDT_short": 1782400558.6679075,
     "BTCUSDT_short": 1782400559.8905723,
@@ -65,7 +62,7 @@
       "take_profit_1": 58.32086714285715,
       "take_profit_2": 56.44646571428573,
       "message_id": 869,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782400561.101241
