@@ -1,10 +1,5 @@
 {
   "fired_signals": {
-    "APTUSDT_short": 1782383455.5461838,
-    "DOGEUSDT_short": 1782383456.6695838,
-    "DOTUSDT_short": 1782383457.8562129,
-    "LINKUSDT_short": 1782383459.0286684,
-    "XRPUSDT_short": 1782383460.18724,
     "BTCUSDT_short": 1782384346.747668,
     "ADAUSDT_short": 1782384347.9256678,
     "HYPEUSDT_short": 1782384349.1386583,
@@ -18,84 +13,11 @@
     "NEARUSDT_short": 1782389765.4456563,
     "PENGUUSDT_short": 1782389766.4852498,
     "ETHUSDT_short": 1782389767.4990418,
-    "BNBUSDT_short": 1782389768.5068393
+    "BNBUSDT_short": 1782389768.5068393,
+    "APTUSDT_short": 1782391557.356908,
+    "DOGEUSDT_short": 1782391558.3824785
   },
   "active_signals": {
-    "APTUSDT_short": {
-      "symbol": "APTUSDT",
-      "direction": "short",
-      "exact_entry": 0.633862,
-      "entry_zone_high": 0.6348,
-      "entry_zone_low": 0.6334,
-      "stop_loss": 0.63714,
-      "take_profit_1": 0.627306,
-      "take_profit_2": 0.624028,
-      "message_id": 771,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782383455.5461893
-    },
-    "DOGEUSDT_short": {
-      "symbol": "DOGEUSDT",
-      "direction": "short",
-      "exact_entry": 0.07691635,
-      "entry_zone_high": 0.07698,
-      "entry_zone_low": 0.076885,
-      "stop_loss": 0.07715685714285715,
-      "take_profit_1": 0.07643533571428568,
-      "take_profit_2": 0.075891,
-      "message_id": 772,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782383456.6695879
-    },
-    "DOTUSDT_short": {
-      "symbol": "DOTUSDT",
-      "direction": "short",
-      "exact_entry": 0.8843052,
-      "entry_zone_high": 0.88527,
-      "entry_zone_low": 0.88383,
-      "stop_loss": 0.8898394285714286,
-      "take_profit_1": 0.8732367428571428,
-      "take_profit_2": 0.8677025142857142,
-      "message_id": 773,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782383457.8562176
-    },
-    "LINKUSDT_short": {
-      "symbol": "LINKUSDT",
-      "direction": "short",
-      "exact_entry": 7.510312,
-      "entry_zone_high": 7.5146,
-      "entry_zone_low": 7.5082,
-      "stop_loss": 7.531485714285714,
-      "take_profit_1": 7.467964571428571,
-      "take_profit_2": 7.381,
-      "message_id": 774,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782383459.028673
-    },
-    "XRPUSDT_short": {
-      "symbol": "XRPUSDT",
-      "direction": "short",
-      "exact_entry": 1.084162,
-      "entry_zone_high": 1.0851,
-      "entry_zone_low": 1.0837,
-      "stop_loss": 1.0872357142857143,
-      "take_profit_1": 1.0780145714285716,
-      "take_profit_2": 1.0694,
-      "message_id": 775,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782383460.187244
-    },
     "BTCUSDT_short": {
       "symbol": "BTCUSDT",
       "direction": "short",
@@ -305,6 +227,36 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782389768.5068448
+    },
+    "APTUSDT_short": {
+      "symbol": "APTUSDT",
+      "direction": "short",
+      "exact_entry": 0.6295476,
+      "entry_zone_high": 0.6298,
+      "entry_zone_low": 0.6268,
+      "stop_loss": 0.6330214285714286,
+      "take_profit_1": 0.6225999428571427,
+      "take_profit_2": 0.6191261142857141,
+      "message_id": 816,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782391557.3569129
+    },
+    "DOGEUSDT_short": {
+      "symbol": "DOGEUSDT",
+      "direction": "short",
+      "exact_entry": 0.07691635,
+      "entry_zone_high": 0.07698,
+      "entry_zone_low": 0.076885,
+      "stop_loss": 0.077283,
+      "take_profit_1": 0.07618304999999997,
+      "take_profit_2": 0.075891,
+      "message_id": 817,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782391558.3824847
     }
   }
 }
