@@ -5,7 +5,7 @@ Combo 1 : HTF OB (4H) + FVG + MSB
 Combo 2 : Liquidity Sweep + OB + FVG
 Combo 3 : Fibonacci 0.5 / 0.618 / 0.786 confluence layer
 
-Timeframes : 4H (bias) → 1H (zone refinement) → 15M (entry trigger)
+Timeframes : 1D (macro bias) → 4H (bias) → 1H (zone refinement) → 15M (entry trigger)
 Exchange   : Hyperliquid (same API as original bot)
 Alerts     : Telegram (HTML)
 
@@ -40,6 +40,7 @@ SCAN_INTERVAL_S = 60 * 15   # Every 15 minutes (aligns with candle close)
 N_15M           = 200
 N_1H            = 150
 N_4H            = 100
+N_1D            = 60        # 60 daily candles (~2 months) — plenty for bias
 
 # ── SESSION FILTER (High priority upgrade) ────────────────────────────────────
 # Only trade during London (07:00–12:00 UTC) and New York (13:00–20:00 UTC)
@@ -103,6 +104,7 @@ INTERVAL_MS = {
     "15m": 15 * 60 * 1000,
     "1h":  60 * 60 * 1000,
     "4h":  4  * 60 * 60 * 1000,
+    "1d":  24 * 60 * 60 * 1000,
 }
 
 # ── RATE LIMIT ────────────────────────────────────────────────────────────────
@@ -116,6 +118,12 @@ _hl_session      = requests.Session()
 # cuts API calls from 75 → ~50 (saves one round-trip per symbol).
 _candle_cache: dict[str, dict] = {}   # key: symbol → {"candles": [...], "ts": float}
 _CANDLE_CACHE_TTL_S = 60 * 60         # 60-minute TTL (well within a 4H close)
+
+# ── 1D CANDLE CACHE ───────────────────────────────────────────────────────────
+# Daily candles close once per day; safe to cache for 4–6 hours.
+# Stored separately so the TTL can differ from the 4H cache.
+_candle_cache_1d: dict[str, dict] = {}
+_CANDLE_CACHE_1D_TTL_S = 60 * 60 * 4  # 4-hour TTL
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -232,6 +240,20 @@ def get_candles_4h_cached(symbol: str) -> list[dict]:
         return entry["candles"]
     candles = get_candles(symbol, "4h", N_4H)
     _candle_cache[symbol] = {"candles": candles, "ts": time.time()}
+    return candles
+
+
+def get_candles_1d_cached(symbol: str) -> list[dict]:
+    """
+    Return 1D candles from the in-memory cache when fresh (< 4 hours old).
+    Daily candles rarely change during a scan window, so this TTL is generous.
+    One fetch per symbol per 4-hour window across all scan runs.
+    """
+    entry = _candle_cache_1d.get(symbol)
+    if entry and (time.time() - entry["ts"]) < _CANDLE_CACHE_1D_TTL_S:
+        return entry["candles"]
+    candles = get_candles(symbol, "1d", N_1D)
+    _candle_cache_1d[symbol] = {"candles": candles, "ts": time.time()}
     return candles
 
 
@@ -708,7 +730,8 @@ def compute_exact_entry(direction: str,
 def compute_smc_signal(symbol: str,
                         candles_15m: list[dict],
                         candles_1h:  list[dict],
-                        candles_4h:  list[dict]) -> SMCSignal | None:
+                        candles_4h:  list[dict],
+                        candles_1d:  list[dict]) -> SMCSignal | None:
     """
     Full Combo 1 + Combo 2 + Fibonacci confluence engine.
 
@@ -735,9 +758,17 @@ def compute_smc_signal(symbol: str,
     if bias == "neutral":
         return None
     direction = "long" if bias == "bull" else "short"
+
+    # ── Step 1b: 1D Bias Alignment Filter ───────────────────────────────────
+    # Only trade with the daily trend.  If 4H is bullish but 1D is bearish
+    # (or vice-versa) the setup is counter-trend — skip entirely.
+    bias_1d = get_htf_bias(candles_1d) if len(candles_1d) >= 55 else "neutral"
+    if bias_1d != "neutral" and bias_1d != bias:
+        return None   # 4H and 1D disagree — skip
+
     score = 1
     combos = ["HTF_BIAS"]
-    details: dict = {"htf_bias": bias}
+    details: dict = {"htf_bias": bias, "bias_1d": bias_1d}
 
     # ── Step 2: 4H Order Block ───────────────────────────────────────────────
     obs_4h  = find_order_blocks(candles_4h, "4h", atr_4h, bias)
@@ -958,14 +989,14 @@ def format_signal_message(sig: SMCSignal) -> str:
 
     # Combo labels (no emojis)
     combo_labels = {
-        "HTF_BIAS":   "HTF Bias (4H)",
-        "4H_OB":      "4H Order Block",
-        "FVG":        "FVG (Combo 1)",
-        "LIQ_SWEEP":  "Liquidity Sweep (Combo 2)",
-        "15M_MSB":    "15M MSB Confirmed",
-        "15M_OB_FVG": "15M OB/FVG Entry",
-        "FIB_GOLDEN": "Fib Golden Zone 0.618–0.786",
-        "FIB_LEVEL":  f"Fib Level ({sig.details.get('fib_zone', '')})",
+        "HTF_BIAS":      "HTF Bias (4H)",
+        "4H_OB":         "4H Order Block",
+        "FVG":           "FVG (Combo 1)",
+        "LIQ_SWEEP":     "Liquidity Sweep (Combo 2)",
+        "15M_MSB":       "15M MSB Confirmed",
+        "15M_OB_FVG":    "15M OB/FVG Entry",
+        "FIB_GOLDEN":    "Fib Golden Zone 0.618–0.786",
+        "FIB_LEVEL":     f"Fib Level ({sig.details.get('fib_zone', '')})",
     }
     combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
 
@@ -985,6 +1016,7 @@ def format_signal_message(sig: SMCSignal) -> str:
     entry_reason = sig.details.get("exact_entry_reason", "")
     entry_src    = sig.details.get("entry_source", "Zone")
     htf_bias     = sig.details.get("htf_bias", "").upper()
+    bias_1d      = sig.details.get("bias_1d", "neutral").upper()
     max_score    = 8
 
     rr1 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_1, sig.direction)
@@ -1000,7 +1032,7 @@ def format_signal_message(sig: SMCSignal) -> str:
 
     msg = (
         f"<b>{dir_marker} {sig.symbol} — {dir_label}</b>  |  Grade <b>{sig.signal_grade}</b>  |  {sig.confluence}/{max_score}\n"
-        f"4H Bias: <b>{htf_bias}</b>  |  {sig.timestamp}\n"
+        f"1D: <b>{bias_1d}</b>  |  4H: <b>{htf_bias}</b>  |  {sig.timestamp}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{cur_price_line}"
         f"\n<b>Entry Zone</b> ({entry_src})\n"
@@ -1047,6 +1079,7 @@ def mark_fired(sig: SMCSignal) -> None:
 def scan_symbol(symbol: str) -> SMCSignal | None:
     try:
         c4h  = get_candles_4h_cached(symbol)   # served from cache after first fetch
+        c1d  = get_candles_1d_cached(symbol)   # 1D bias filter — 4-hour cache
         c1h  = get_candles(symbol, "1h",  N_1H)
         c15m = get_candles(symbol, "15m", N_15M)
         if len(c4h) < 60 or len(c1h) < 60 or len(c15m) < 60:
@@ -1069,7 +1102,7 @@ def scan_symbol(symbol: str) -> SMCSignal | None:
                       f"current TR={current_atr:.6f} > 3× avg ATR({avg_atr_20:.6f})")
                 return None
 
-        return compute_smc_signal(symbol, c15m, c1h, c4h)
+        return compute_smc_signal(symbol, c15m, c1h, c4h, c1d)
     except Exception as e:
         print(f"  [SCAN ERROR] {symbol}: {e}")
         return None
@@ -1661,13 +1694,13 @@ def save_state() -> None:
 
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v2.1  [single-scan mode]")
+    print("  SMC Signal Engine v4.0  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
     print("  Upgrades: Session filter | Volume gate | BTC regime")
     print("            TP2 1:3 gate | Multi-bar sweep | Win rate memory")
-    print("  Timeframes: 4H / 1H / 15M")
+    print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
     print("=" * 60)
 
     load_state()
