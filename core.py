@@ -1172,14 +1172,59 @@ def run_scan() -> None:
     # ── Fetch current prices in one batch call ───────────────────────────────
     all_mids = fetch_all_mids()
 
+    # ── Pre-send staleness filters ────────────────────────────────────────────
+    # MAX_ENTRY_DIST_PCT : drop signals whose entry zone is too far from price
+    # (predictive is fine, but >3% away rarely fills within the 2h window)
+    MAX_ENTRY_DIST_PCT = 2.5
+
     print(f"\n  [TOP {TOP_N_SIGNALS}] Sending best signals:")
     for sig in final:
         coin      = hl_coin(sig.symbol)
         cur_price = all_mids.get(coin)
+
         if cur_price is not None:
             dist_pct = abs(cur_price - sig.exact_entry) / cur_price * 100
-            sig.details["current_price"]    = cur_price
-            sig.details["entry_dist_pct"]   = dist_pct
+            sig.details["current_price"]  = cur_price
+            sig.details["entry_dist_pct"] = dist_pct
+
+            # ── Guard 1: price already past TP2 or SL ────────────────────────
+            if sig.direction == "long":
+                already_tp = cur_price >= sig.take_profit_2
+                already_sl = cur_price <= sig.stop_loss
+            else:
+                already_tp = cur_price <= sig.take_profit_2
+                already_sl = cur_price >= sig.stop_loss
+
+            if already_tp:
+                print(f"  ⛔ STALE-TP {sig.symbol} {sig.direction.upper()} — "
+                      f"price {fmt_price(cur_price)} already past TP2 "
+                      f"{fmt_price(sig.take_profit_2)} — skipped")
+                continue
+            if already_sl:
+                print(f"  ⛔ STALE-SL {sig.symbol} {sig.direction.upper()} — "
+                      f"price {fmt_price(cur_price)} already past SL "
+                      f"{fmt_price(sig.stop_loss)} — skipped")
+                continue
+
+            # ── Guard 2: price already past the exact entry (limit already missed) ──
+            # Being inside the zone is fine — the limit order is still valid.
+            # Only skip if price has blown past the exact entry price itself.
+            if sig.direction == "long":
+                past_exact_entry = cur_price <= sig.exact_entry
+            else:
+                past_exact_entry = cur_price >= sig.exact_entry
+
+            if past_exact_entry:
+                print(f"  ⛔ PAST-ENTRY {sig.symbol} {sig.direction.upper()} — "
+                      f"price {fmt_price(cur_price)} already past limit entry "
+                      f"{fmt_price(sig.exact_entry)} — skipped")
+                continue
+
+            # ── Guard 3: entry zone too far from current price ────────────────
+            if dist_pct > MAX_ENTRY_DIST_PCT:
+                print(f"  ⛔ TOO-FAR {sig.symbol} {sig.direction.upper()} — "
+                      f"entry {dist_pct:.1f}% away (max {MAX_ENTRY_DIST_PCT}%) — skipped")
+                continue
 
         msg    = format_signal_message(sig)
         msg_id = send_telegram_get_id(msg)
@@ -1188,6 +1233,7 @@ def run_scan() -> None:
             track_active_signal(sig, msg_id)
         print(f"  📤 Sent: {sig.symbol} {sig.direction.upper()} "
               f"{sig.signal_grade} | Entry: {fmt_price(sig.exact_entry)} "
+              f"| dist: {sig.details.get('entry_dist_pct', 0):.1f}% "
               f"| msg_id: {msg_id}")
         time.sleep(0.5)
 
@@ -1211,10 +1257,11 @@ def send_telegram_get_id(text: str) -> int | None:
             time.sleep(2)
     return None
 
-def react_to_message(message_id: int, emoji: str) -> None:
+def react_to_message(message_id: int, emoji: str) -> bool:
     """
     Send a reaction to an existing Telegram message.
     Uses setMessageReaction (Bot API 7.0+).
+    Returns True on success.
     """
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/setMessageReaction"
     try:
@@ -1224,23 +1271,35 @@ def react_to_message(message_id: int, emoji: str) -> None:
             "reaction":   [{"type": "emoji", "emoji": emoji}],
             "is_big":     True,
         }, timeout=10)
-        r.raise_for_status()
+        data = r.json()
+        if not data.get("ok"):
+            print(f"  [REACT FAIL] msg {message_id} {emoji}: {data.get('description', 'unknown error')}")
+            return False
         print(f"  [REACT] {emoji} → msg {message_id}")
+        return True
     except Exception as e:
         print(f"  [REACT ERROR] msg {message_id}: {e}")
+        return False
 
-def delete_message(message_id: int) -> None:
-    """Delete a Telegram message (used for expired/invalid signals)."""
+def delete_message(message_id: int) -> bool:
+    """Delete a Telegram message (used for expired/invalid signals).
+    Returns True on success.
+    """
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteMessage"
     try:
         r = requests.post(url, json={
             "chat_id":    TG_CHAT_ID,
             "message_id": message_id,
         }, timeout=10)
-        r.raise_for_status()
+        data = r.json()
+        if not data.get("ok"):
+            print(f"  [DELETE FAIL] msg {message_id}: {data.get('description', 'unknown error')}")
+            return False
         print(f"  [DELETE] msg {message_id} removed")
+        return True
     except Exception as e:
         print(f"  [DELETE ERROR] msg {message_id}: {e}")
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1304,18 +1363,19 @@ def check_reactions() -> None:
     """
     For every active (unresolved) signal, fetch current price and:
 
-    Phase 1 — Waiting for entry:
-      Price must touch the entry zone (entry_zone_low–entry_zone_high)
-      or reach the exact limit entry before TP/SL monitoring begins.
-      Until then: do nothing (trade not filled yet).
+    Phase 1 — Waiting for entry zone touch:
+      Price must touch the entry zone before TP/SL monitoring begins.
 
     Phase 2 — Trade active:
-      🔥  TP1 hit before SL
-      🏆  TP2 also hit (full winner)
-      😭  SL hit before TP1
+      🔥  TP1 hit
+      🏆  TP2 hit (full winner)
+      😭  SL hit before TP1 (loss) or after TP1 (partial — still resolves)
     """
     now     = time.time()
     to_drop = []
+
+    # Fetch all prices in one API call instead of one call per signal
+    all_mids = fetch_all_mids()
 
     for key, s in _active_signals.items():
         if s["resolved"]:
@@ -1328,7 +1388,8 @@ def check_reactions() -> None:
             to_drop.append(key)
             continue
 
-        price = get_mid_price(s["symbol"])
+        coin  = hl_coin(s["symbol"])
+        price = all_mids.get(coin)
         if price is None:
             continue
 
@@ -1394,18 +1455,24 @@ def check_reactions() -> None:
             tp1_hit = price <= tp1
             tp2_hit = price <= tp2
 
-        if sl_hit and not s["tp1_hit"]:
-            react_to_message(msg_id, "😭")
-            record_outcome(s["symbol"], s.get("combos_hit", []), "loss")
-            s["resolved"] = True
-            to_drop.append(key)
-
-        elif tp2_hit:
+        if tp2_hit:
             if not s["tp1_hit"]:
                 react_to_message(msg_id, "🔥")
                 s["tp1_hit"] = True
             react_to_message(msg_id, "🏆")
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
+            s["resolved"] = True
+            to_drop.append(key)
+
+        elif sl_hit:
+            if not s["tp1_hit"]:
+                # Clean loss — SL hit before TP1
+                react_to_message(msg_id, "😭")
+                record_outcome(s["symbol"], s.get("combos_hit", []), "loss")
+            else:
+                # TP1 was already hit, SL hit after — partial win, still resolve
+                react_to_message(msg_id, "😭")
+                record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
             s["resolved"] = True
             to_drop.append(key)
 
