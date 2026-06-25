@@ -16,7 +16,11 @@
     "TAOUSDT_short": 1782393355.7373793,
     "SOLUSDT_short": 1782393356.9284465,
     "LTCUSDT_short": 1782393358.1284108,
-    "PENDLEUSDT_short": 1782393359.3029437
+    "PENDLEUSDT_short": 1782393359.3029437,
+    "LINKUSDT_short": 1782395163.8067422,
+    "XRPUSDT_short": 1782395164.8501916,
+    "XLMUSDT_short": 1782395165.8976994,
+    "ONDOUSDT_short": 1782395166.914624
   },
   "active_signals": {
     "AAVEUSDT_long": {
@@ -34,21 +38,6 @@
       "resolved": false,
       "sent_at": 1782385264.7207584
     },
-    "SUIUSDT_short": {
-      "symbol": "SUIUSDT",
-      "direction": "short",
-      "exact_entry": 0.6950769,
-      "entry_zone_high": 0.69637,
-      "entry_zone_low": 0.69444,
-      "stop_loss": 0.6990707142857143,
-      "take_profit_1": 0.6870892714285713,
-      "take_profit_2": 0.68655,
-      "message_id": 808,
-      "entered": true,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782388863.3987665
-    },
     "NEARUSDT_short": {
       "symbol": "NEARUSDT",
       "direction": "short",
@@ -63,21 +52,6 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782389765.4456632
-    },
-    "PENGUUSDT_short": {
-      "symbol": "PENGUUSDT",
-      "direction": "short",
-      "exact_entry": 0.00609228,
-      "entry_zone_high": 0.006103,
-      "entry_zone_low": 0.006087,
-      "stop_loss": 0.006126071428571429,
-      "take_profit_1": 0.0060246971428571435,
-      "take_profit_2": 0.00602,
-      "message_id": 811,
-      "entered": true,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782389766.485255
     },
     "ETHUSDT_short": {
       "symbol": "ETHUSDT",
@@ -258,6 +232,66 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782393359.3029501
+    },
+    "LINKUSDT_short": {
+      "symbol": "LINKUSDT",
+      "direction": "short",
+      "exact_entry": 7.4489,
+      "entry_zone_high": 7.4609,
+      "entry_zone_low": 7.437,
+      "stop_loss": 7.502521428571428,
+      "take_profit_1": 7.341657142857144,
+      "take_profit_2": 7.2285,
+      "message_id": 831,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782395163.8067486
+    },
+    "XRPUSDT_short": {
+      "symbol": "XRPUSDT",
+      "direction": "short",
+      "exact_entry": 1.07495,
+      "entry_zone_high": 1.0753,
+      "entry_zone_low": 1.0727,
+      "stop_loss": 1.0801999999999998,
+      "take_profit_1": 1.0644500000000006,
+      "take_profit_2": 1.0535,
+      "message_id": 832,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782395164.850197
+    },
+    "XLMUSDT_short": {
+      "symbol": "XLMUSDT",
+      "direction": "short",
+      "exact_entry": 0.1842792,
+      "entry_zone_high": 0.18444,
+      "entry_zone_low": 0.1842,
+      "stop_loss": 0.18601576285714286,
+      "take_profit_1": 0.1808060742857143,
+      "take_profit_2": 0.1773329485714286,
+      "message_id": 833,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782395165.8977058
+    },
+    "ONDOUSDT_short": {
+      "symbol": "ONDOUSDT",
+      "direction": "short",
+      "exact_entry": 0.3137534,
+      "entry_zone_high": 0.31508,
+      "entry_zone_low": 0.3131,
+      "stop_loss": 0.3181014285714286,
+      "take_profit_1": 0.30505734285714287,
+      "take_profit_2": 0.3007093142857143,
+      "message_id": 835,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782395166.9146295
     }
   }
 }
