@@ -1,1 +1,54 @@
-{}
+{
+  "fired_signals": {
+    "NEARUSDT_short": 1782405145.882805,
+    "ETHUSDT_short": 1782405147.0354245
+  },
+  "active_signals": {
+    "NEARUSDT_short": {
+      "symbol": "NEARUSDT",
+      "direction": "short",
+      "exact_entry": 1.9315744,
+      "entry_zone_high": 1.9372,
+      "entry_zone_low": 1.9163,
+      "stop_loss": 1.970157142857143,
+      "take_profit_1": 1.8544089142857139,
+      "take_profit_2": 1.8158261714285708,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 874,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782405145.88281
+    },
+    "ETHUSDT_short": {
+      "symbol": "ETHUSDT",
+      "direction": "short",
+      "exact_entry": 1637.6964,
+      "entry_zone_high": 1639.0,
+      "entry_zone_low": 1633.7,
+      "stop_loss": 1661.9357142857143,
+      "take_profit_1": 1589.2177714285715,
+      "take_profit_2": 1551.3,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG",
+        "FIB_LEVEL"
+      ],
+      "message_id": 875,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782405147.0354288
+    }
+  }
+}
