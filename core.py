@@ -63,7 +63,7 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is now 7 (added Fibonacci layer)
-MIN_CONFLUENCE_SCORE  = 3
+MIN_CONFLUENCE_SCORE  = 5
 STRONG_SIGNAL_SCORE   = 5
 APLUS_SIGNAL_SCORE    = 6
 
