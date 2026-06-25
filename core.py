@@ -28,9 +28,11 @@ HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "ADAUSDT", "AVAXUSDT", "DOGEUSDT", "LINKUSDT", "SUIUSDT",
-    "AAVEUSDT", "NEARUSDT", "APTUSDT", "DOTUSDT", "UNIUSDT",
+    "BTCUSDT", "ETHUSDT", "HYPEUSDT", "ZECUSDT", "NEARUSDT",
+    "ONDOUSDT", "SUIUSDT", "PENGUUSDT", "BNBUSDT", "SOLUSDT",
+    "TRXUSDT", "BCHUSDT", "DOGEUSDT", "ADAUSDT", "DOTUSDT",
+    "TAOUSDT", "AVAXUSDT", "LINKUSDT", "AAVEUSDT", "XRPUSDT",
+    "XLMUSDT", "UNIUSDT", "LTCUSDT", "APTUSDT", "PENDLEUSDT",
 ]
 
 # ── SCAN CONFIG ───────────────────────────────────────────────────────────────
