@@ -302,7 +302,7 @@
       "take_profit_1": 85.00118714285713,
       "take_profit_2": 86.3755257142857,
       "message_id": 797,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782385264.7207584
