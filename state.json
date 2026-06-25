@@ -9,7 +9,12 @@
     "DOGEUSDT_short": 1782383456.6695838,
     "DOTUSDT_short": 1782383457.8562129,
     "LINKUSDT_short": 1782383459.0286684,
-    "XRPUSDT_short": 1782383460.18724
+    "XRPUSDT_short": 1782383460.18724,
+    "BTCUSDT_short": 1782384346.747668,
+    "ADAUSDT_short": 1782384347.9256678,
+    "HYPEUSDT_short": 1782384349.1386583,
+    "ZECUSDT_short": 1782384350.3080778,
+    "TRXUSDT_long": 1782384351.5092196
   },
   "active_signals": {
     "XLMUSDT_short": {
@@ -161,6 +166,81 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782383460.187244
+    },
+    "BTCUSDT_short": {
+      "symbol": "BTCUSDT",
+      "direction": "short",
+      "exact_entry": 61616.048,
+      "entry_zone_high": 61617.0,
+      "entry_zone_low": 61556.0,
+      "stop_loss": 61745.28571428572,
+      "take_profit_1": 61357.57257142857,
+      "take_profit_2": 60758.0,
+      "message_id": 785,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782384346.7476726
+    },
+    "ADAUSDT_short": {
+      "symbol": "ADAUSDT",
+      "direction": "short",
+      "exact_entry": 0.1490922,
+      "entry_zone_high": 0.14932,
+      "entry_zone_low": 0.14898,
+      "stop_loss": 0.1497807142857143,
+      "take_profit_1": 0.14771517142857143,
+      "take_profit_2": 0.14691,
+      "message_id": 786,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782384347.9256709
+    },
+    "HYPEUSDT_short": {
+      "symbol": "HYPEUSDT",
+      "direction": "short",
+      "exact_entry": 63.46208,
+      "entry_zone_high": 63.58,
+      "entry_zone_low": 63.404,
+      "stop_loss": 63.939957142857146,
+      "take_profit_1": 62.50632571428571,
+      "take_profit_2": 62.02844857142856,
+      "message_id": 787,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782384349.1386623
+    },
+    "ZECUSDT_short": {
+      "symbol": "ZECUSDT",
+      "direction": "short",
+      "exact_entry": 414.9574,
+      "entry_zone_high": 415.48,
+      "entry_zone_low": 414.7,
+      "stop_loss": 417.2171428571429,
+      "take_profit_1": 410.4379142857142,
+      "take_profit_2": 408.1781714285713,
+      "message_id": 788,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782384350.3080814
+    },
+    "TRXUSDT_long": {
+      "symbol": "TRXUSDT",
+      "direction": "long",
+      "exact_entry": 0.3276239,
+      "entry_zone_high": 0.32768,
+      "entry_zone_low": 0.32751,
+      "stop_loss": 0.3271671428571429,
+      "take_profit_1": 0.3285374142857143,
+      "take_profit_2": 0.32928,
+      "message_id": 789,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782384351.509224
     }
   }
 }
