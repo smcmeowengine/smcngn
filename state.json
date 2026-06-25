@@ -4,7 +4,6 @@
     "SUIUSDT_short": 1782388863.3987608,
     "NEARUSDT_short": 1782389765.4456563,
     "PENGUUSDT_short": 1782389766.4852498,
-    "ETHUSDT_short": 1782389767.4990418,
     "BNBUSDT_short": 1782389768.5068393,
     "APTUSDT_short": 1782391557.356908,
     "DOGEUSDT_short": 1782391558.3824785,
@@ -20,24 +19,10 @@
     "LINKUSDT_short": 1782395163.8067422,
     "XRPUSDT_short": 1782395164.8501916,
     "XLMUSDT_short": 1782395165.8976994,
-    "ONDOUSDT_short": 1782395166.914624
+    "ONDOUSDT_short": 1782395166.914624,
+    "ETHUSDT_short": 1782397865.8783176
   },
   "active_signals": {
-    "ETHUSDT_short": {
-      "symbol": "ETHUSDT",
-      "direction": "short",
-      "exact_entry": 1646.993,
-      "entry_zone_high": 1648.4,
-      "entry_zone_low": 1646.3,
-      "stop_loss": 1653.4142857142858,
-      "take_profit_1": 1634.1504285714282,
-      "take_profit_2": 1627.1,
-      "message_id": 812,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782389767.4990475
-    },
     "APTUSDT_short": {
       "symbol": "APTUSDT",
       "direction": "short",
@@ -262,6 +247,21 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782395166.9146295
+    },
+    "ETHUSDT_short": {
+      "symbol": "ETHUSDT",
+      "direction": "short",
+      "exact_entry": 1637.6964,
+      "entry_zone_high": 1639.0,
+      "entry_zone_low": 1633.7,
+      "stop_loss": 1656.7571428571428,
+      "take_profit_1": 1599.5749142857146,
+      "take_profit_2": 1551.3,
+      "message_id": 845,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782397865.878324
     }
   }
 }
