@@ -1153,13 +1153,51 @@ def check_reactions() -> None:
 STATE_FILE = pathlib.Path("state.json")
 
 
+def cleanup_state() -> None:
+    """
+    Prune stale entries from both dicts before saving.
+
+    fired_signals  — remove entries older than the cooldown window (4h).
+                     Once the cooldown has passed the entry serves no purpose.
+
+    active_signals — remove entries that are resolved or have exceeded the
+                     7-day TTL. These should already be dropped by
+                     check_reactions() but this is a safety net.
+    """
+    now = time.time()
+
+    # ── fired_signals cleanup ────────────────────────────────────────────────
+    before = len(_fired_signals)
+    expired_fired = [k for k, ts in _fired_signals.items()
+                     if now - ts > SIGNAL_COOLDOWN_S]
+    for k in expired_fired:
+        _fired_signals.pop(k, None)
+    fired_removed = before - len(_fired_signals)
+
+    # ── active_signals cleanup ───────────────────────────────────────────────
+    before = len(_active_signals)
+    stale_active = [k for k, s in _active_signals.items()
+                    if s.get("resolved", False)
+                    or now - s.get("sent_at", 0) > ACTIVE_SIGNAL_TTL_S]
+    for k in stale_active:
+        _active_signals.pop(k, None)
+    active_removed = before - len(_active_signals)
+
+    if fired_removed or active_removed:
+        print(f"  [CLEANUP] Removed {fired_removed} expired cooldowns, "
+              f"{active_removed} stale active signals")
+    else:
+        print(f"  [CLEANUP] Nothing to clean "
+              f"({len(_fired_signals)} cooldowns, {len(_active_signals)} active)")
+
+
 def load_state() -> None:
     global _fired_signals, _active_signals
     if STATE_FILE.exists():
         try:
-            data           = json.loads(STATE_FILE.read_text())
-            _fired_signals = {k: float(v)
-                              for k, v in data.get("fired_signals", {}).items()}
+            data            = json.loads(STATE_FILE.read_text())
+            _fired_signals  = {k: float(v)
+                               for k, v in data.get("fired_signals", {}).items()}
             _active_signals = data.get("active_signals", {})
             print(f"  [STATE] Loaded {len(_fired_signals)} cooldown + "
                   f"{len(_active_signals)} active signals")
@@ -1174,6 +1212,7 @@ def load_state() -> None:
 
 
 def save_state() -> None:
+    cleanup_state()   # prune before writing
     try:
         STATE_FILE.write_text(json.dumps({
             "fired_signals":  _fired_signals,
