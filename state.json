@@ -23,7 +23,7 @@
         "FIB_LEVEL"
       ],
       "message_id": 894,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782416753.789714
