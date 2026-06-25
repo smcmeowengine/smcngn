@@ -7,7 +7,8 @@
     "HYPEUSDT_short": 1782406860.97586,
     "ONDOUSDT_short": 1782406861.9976556,
     "BCHUSDT_short": 1782407753.015998,
-    "PENDLEUSDT_short": 1782407754.079303
+    "PENDLEUSDT_short": 1782407754.079303,
+    "BTCUSDT_short": 1782408658.6514978
   },
   "active_signals": {
     "NEARUSDT_short": {
@@ -74,7 +75,7 @@
         "FIB_GOLDEN"
       ],
       "message_id": 880,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782405950.957073
@@ -119,7 +120,7 @@
         "15M_OB_FVG"
       ],
       "message_id": 882,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782406860.9758658
@@ -189,6 +190,29 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782407754.0793087
+    },
+    "BTCUSDT_short": {
+      "symbol": "BTCUSDT",
+      "direction": "short",
+      "exact_entry": 61204.01,
+      "entry_zone_high": 61336.0,
+      "entry_zone_low": 61139.0,
+      "stop_loss": 61912.357142857145,
+      "take_profit_1": 59787.315714285716,
+      "take_profit_2": 59060.0,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG",
+        "FIB_LEVEL"
+      ],
+      "message_id": 886,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782408658.6515043
     }
   }
 }
