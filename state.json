@@ -3,7 +3,9 @@
     "NEARUSDT_short": 1782405145.882805,
     "ETHUSDT_short": 1782405147.0354245,
     "ADAUSDT_short": 1782405950.957068,
-    "SUIUSDT_short": 1782405952.061195
+    "SUIUSDT_short": 1782405952.061195,
+    "HYPEUSDT_short": 1782406860.97586,
+    "ONDOUSDT_short": 1782406861.9976556
   },
   "active_signals": {
     "NEARUSDT_short": {
@@ -97,6 +99,50 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782405952.0612009
+    },
+    "HYPEUSDT_short": {
+      "symbol": "HYPEUSDT",
+      "direction": "short",
+      "exact_entry": 62.542,
+      "entry_zone_high": 62.873,
+      "entry_zone_low": 61.674,
+      "stop_loss": 64.15392857142857,
+      "take_profit_1": 59.318142857142874,
+      "take_profit_2": 57.70621428571431,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 882,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782406860.9758658
+    },
+    "ONDOUSDT_short": {
+      "symbol": "ONDOUSDT",
+      "direction": "short",
+      "exact_entry": 0.3137534,
+      "entry_zone_high": 0.31508,
+      "entry_zone_low": 0.3131,
+      "stop_loss": 0.32046,
+      "take_profit_1": 0.3003402,
+      "take_profit_2": 0.2936336,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 883,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782406861.9976606
     }
   }
 }
