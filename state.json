@@ -35,7 +35,7 @@
       "take_profit_1": 0.1375702142857143,
       "take_profit_2": 0.13440957142857146,
       "message_id": 867,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782400558.6679127
