@@ -4,30 +4,6 @@
     "ONDOUSDT_short": 1782416754.8397985
   },
   "active_signals": {
-    "ZECUSDT_short": {
-      "symbol": "ZECUSDT",
-      "direction": "short",
-      "exact_entry": 405.145,
-      "entry_zone_high": 407.2,
-      "entry_zone_low": 404.23,
-      "stop_loss": 410.6192857142857,
-      "take_profit_1": 394.19642857142856,
-      "take_profit_2": 387.37,
-      "combos_hit": [
-        "HTF_BIAS",
-        "4H_OB",
-        "FVG",
-        "LIQ_SWEEP",
-        "15M_MSB",
-        "15M_OB_FVG",
-        "FIB_LEVEL"
-      ],
-      "message_id": 894,
-      "entered": true,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782416753.789714
-    },
     "ONDOUSDT_short": {
       "symbol": "ONDOUSDT",
       "direction": "short",
