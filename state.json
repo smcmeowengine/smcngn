@@ -14,7 +14,12 @@
     "ADAUSDT_short": 1782384347.9256678,
     "HYPEUSDT_short": 1782384349.1386583,
     "ZECUSDT_short": 1782384350.3080778,
-    "TRXUSDT_long": 1782384351.5092196
+    "TRXUSDT_long": 1782384351.5092196,
+    "SOLUSDT_short": 1782385261.683336,
+    "TAOUSDT_short": 1782385262.693571,
+    "LTCUSDT_short": 1782385263.7177541,
+    "AAVEUSDT_long": 1782385264.7207534,
+    "PENDLEUSDT_short": 1782385265.7909296
   },
   "active_signals": {
     "XLMUSDT_short": {
@@ -241,6 +246,81 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782384351.509224
+    },
+    "SOLUSDT_short": {
+      "symbol": "SOLUSDT",
+      "direction": "short",
+      "exact_entry": 68.39161,
+      "entry_zone_high": 68.47,
+      "entry_zone_low": 68.353,
+      "stop_loss": 68.69592857142857,
+      "take_profit_1": 67.78297285714287,
+      "take_profit_2": 67.4786542857143,
+      "message_id": 794,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782385261.6833427
+    },
+    "TAOUSDT_short": {
+      "symbol": "TAOUSDT",
+      "direction": "short",
+      "exact_entry": 220.7079,
+      "entry_zone_high": 221.13,
+      "entry_zone_low": 220.5,
+      "stop_loss": 222.10285714285715,
+      "take_profit_1": 217.9179857142857,
+      "take_profit_2": 216.52302857142854,
+      "message_id": 795,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782385262.6935763
+    },
+    "LTCUSDT_short": {
+      "symbol": "LTCUSDT",
+      "direction": "short",
+      "exact_entry": 41.73939,
+      "entry_zone_high": 41.795,
+      "entry_zone_low": 41.712,
+      "stop_loss": 41.87714285714286,
+      "take_profit_1": 41.463884285714286,
+      "take_profit_2": 41.32613142857143,
+      "message_id": 796,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782385263.71776
+    },
+    "AAVEUSDT_long": {
+      "symbol": "AAVEUSDT",
+      "direction": "long",
+      "exact_entry": 82.25251,
+      "entry_zone_high": 82.468,
+      "entry_zone_low": 81.815,
+      "stop_loss": 80.87817142857143,
+      "take_profit_1": 85.00118714285713,
+      "take_profit_2": 86.3755257142857,
+      "message_id": 797,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782385264.7207584
+    },
+    "PENDLEUSDT_short": {
+      "symbol": "PENDLEUSDT",
+      "direction": "short",
+      "exact_entry": 1.293225,
+      "entry_zone_high": 1.2949,
+      "entry_zone_low": 1.2924,
+      "stop_loss": 1.3028714285714285,
+      "take_profit_1": 1.2739321428571433,
+      "take_profit_2": 1.264285714285715,
+      "message_id": 799,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782385265.7909353
     }
   }
 }
