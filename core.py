@@ -64,7 +64,7 @@ BTC_BEAR_EMA_SLOW         = 50
 
 # ── MINIMUM TP2 R:R GATE (Medium priority upgrade) ───────────────────────────
 # Drop signals whose TP2 reward-to-risk is below 1:3
-TP2_MIN_RR                = 3.0
+TP2_MIN_RR                = 2.5
 
 # ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
@@ -95,7 +95,7 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is now 7 (added Fibonacci layer)
-MIN_CONFLUENCE_SCORE  = 6
+MIN_CONFLUENCE_SCORE  = 5
 STRONG_SIGNAL_SCORE   = 5
 APLUS_SIGNAL_SCORE    = 6
 
@@ -1045,7 +1045,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v3 | Min confluence 6/{max_score}</i>\n"
+        f"\n<i>SMC Signal Engine v4 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
     )
     return msg
 
@@ -1062,8 +1062,14 @@ def is_duplicate(sig: SMCSignal) -> bool:
     # Block if still an active unresolved signal (regardless of cooldown age)
     active = _active_signals.get(key)
     if active and not active.get("resolved", False):
-        print(f"  [DEDUP] {key} blocked — trade still active")
-        return True
+        age_s = time.time() - active.get("sent_at", 0)
+        if age_s < ACTIVE_SIGNAL_TTL_S:
+            print(f"  [DEDUP] {key} blocked — trade still active ({age_s/3600:.1f}h old)")
+            return True
+        else:
+            print(f"  [DEDUP] {key} — active signal expired ({age_s/3600:.1f}h), allowing re-signal")
+            _active_signals.pop(key, None)
+            _fired_signals.pop(key, None)
     # Block if within the 4-hour cooldown window
     last = _fired_signals.get(key, 0)
     return (time.time() - last) < SIGNAL_COOLDOWN_S
@@ -1131,8 +1137,14 @@ def run_scan() -> None:
     # ── Session Filter (High priority upgrade) ────────────────────────────────
     if SESSION_FILTER_ENABLED and not is_active_session():
         hour = datetime.now(timezone.utc).hour
-        print(f"  [SESSION] Outside London/NY hours (UTC hour={hour}) — scan skipped.")
-        return
+        last_fired = max(_fired_signals.values(), default=0)
+        hours_since_signal = (time.time() - last_fired) / 3600
+        if hours_since_signal < 8.0:
+            print(f"  [SESSION] Outside London/NY hours (UTC hour={hour}) — scan skipped "
+                  f"(last signal {hours_since_signal:.1f}h ago).")
+            return
+        print(f"  [SESSION] Outside London/NY hours but {hours_since_signal:.1f}h since last signal "
+              f"— running emergency scan.")
 
     # ── BTC Regime (Medium priority upgrade) — fetch once for whole scan ─────
     btc_bear = btc_regime_blocks_long()
@@ -1243,14 +1255,19 @@ def run_scan() -> None:
             # Being inside the zone is fine — the limit order is still valid.
             # Only skip if price has blown past the exact entry price itself.
             if sig.direction == "long":
-                past_exact_entry = cur_price <= sig.exact_entry
+                past_exact_entry = cur_price < sig.entry_zone_low
             else:
-                past_exact_entry = cur_price >= sig.exact_entry
+                past_exact_entry = cur_price > sig.entry_zone_high
 
             if past_exact_entry:
-                print(f"  ⛔ PAST-ENTRY {sig.symbol} {sig.direction.upper()} — "
-                      f"price {fmt_price(cur_price)} already past limit entry "
-                      f"{fmt_price(sig.exact_entry)} — skipped")
+                if sig.direction == "long":
+                    print(f"  ⛔ PAST-ENTRY {sig.symbol} {sig.direction.upper()} — "
+                          f"price below entry zone "
+                          f"{fmt_price(cur_price)} — skipped")
+                else:
+                    print(f"  ⛔ PAST-ENTRY {sig.symbol} {sig.direction.upper()} — "
+                          f"price above entry zone "
+                          f"{fmt_price(cur_price)} — skipped")
                 continue
 
             # ── Guard 3: entry zone too far from current price ────────────────
