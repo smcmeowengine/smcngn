@@ -1,7 +1,5 @@
 {
   "fired_signals": {
-    "BTCUSDT_short": 1782478865.497472,
-    "ETHUSDT_short": 1782478866.5126245,
     "AVAXUSDT_short": 1782479753.66662,
     "LINKUSDT_short": 1782479754.8577526,
     "HYPEUSDT_short": 1782482463.2121732,
@@ -33,28 +31,6 @@
       "resolved": false,
       "sent_at": 1782482463.2121801
     },
-    "SUIUSDT_short": {
-      "symbol": "SUIUSDT",
-      "direction": "short",
-      "exact_entry": 0.6889691,
-      "entry_zone_high": 0.69183,
-      "entry_zone_low": 0.68756,
-      "stop_loss": 0.6981364285714285,
-      "take_profit_1": 0.6706344428571429,
-      "take_profit_2": 0.65073,
-      "combos_hit": [
-        "HTF_BIAS",
-        "4H_OB",
-        "FVG",
-        "LIQ_SWEEP",
-        "15M_OB_FVG"
-      ],
-      "message_id": 929,
-      "entered": true,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782486051.172236
-    },
     "TAOUSDT_short": {
       "symbol": "TAOUSDT",
       "direction": "short",
@@ -72,11 +48,11 @@
         "15M_OB_FVG"
       ],
       "message_id": 931,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782493233.1417816
+  "last_scan_ts": 1782494119.8416777
 }
