@@ -1409,22 +1409,43 @@ def get_mid_price(symbol: str) -> float | None:
     return None
 
 
+def get_intrabar_range(symbol: str, n_bars: int = 3) -> tuple[float, float] | None:
+    """
+    Fetch the last N closed 15M candles and return (lowest_low, highest_high).
+    This catches wicks that touched SL/TP between scan intervals and recovered
+    before the mid-price snapshot was taken.
+    Returns None on fetch failure — callers fall back to mid price only.
+    """
+    try:
+        candles = get_candles(symbol, "15m", n_bars)
+        if not candles:
+            return None
+        lo = min(c["l"] for c in candles)
+        hi = max(c["h"] for c in candles)
+        return lo, hi
+    except Exception as e:
+        print(f"  [INTRABAR] {symbol} fetch error: {e}")
+        return None
+
+
 def check_reactions() -> None:
     """
-    For every active (unresolved) signal, fetch current price and:
+    For every active (unresolved) signal, fetch current price AND the last 3
+    candle high/lows to catch intrabar wicks that recovered between scans.
 
     Phase 1 — Waiting for entry zone touch:
-      Price must touch the entry zone before TP/SL monitoring begins.
+      Uses bar_low/bar_high so a wick into the zone is never missed.
 
     Phase 2 — Trade active:
-      🔥  TP1 hit
+      🔥  TP1 hit (intrabar high/low or mid price)
       🏆  TP2 hit (full winner)
-      😭  SL hit before TP1 (loss) or after TP1 (partial — still resolves)
+      😭  SL hit after entry
+      😢  SL or TP1 hit before entry zone was ever touched (missed entry)
     """
     now     = time.time()
     to_drop = []
 
-    # Fetch all prices in one API call instead of one call per signal
+    # Fetch all mid prices in one API call
     all_mids = fetch_all_mids()
 
     for key, s in _active_signals.items():
@@ -1443,85 +1464,91 @@ def check_reactions() -> None:
         if price is None:
             continue
 
-        direction  = s["direction"]
-        entry      = s["exact_entry"]
-        zone_high  = s["entry_zone_high"]
-        zone_low   = s["entry_zone_low"]
-        sl         = s["stop_loss"]
-        tp1        = s["take_profit_1"]
-        tp2        = s["take_profit_2"]
-        msg_id     = s["message_id"]
+        direction = s["direction"]
+        zone_high = s["entry_zone_high"]
+        zone_low  = s["entry_zone_low"]
+        sl        = s["stop_loss"]
+        tp1       = s["take_profit_1"]
+        tp2       = s["take_profit_2"]
+        msg_id    = s["message_id"]
 
-        # ── Phase 1: Check if price has touched the entry zone ───────────────
+        # ── Intrabar range: catches wicks that recovered before this scan ─────
+        intrabar = get_intrabar_range(s["symbol"], n_bars=3)
+        if intrabar:
+            bar_low, bar_high = intrabar
+        else:
+            bar_low = bar_high = price   # fallback: treat mid price as the range
+
+        print(f"  [REACT] {key} | mid={fmt_price(price)} "
+              f"bar=[{fmt_price(bar_low)}–{fmt_price(bar_high)}]")
+
+        # ── Phase 1: Waiting for entry zone touch ─────────────────────────────
         if not s["entered"]:
 
-            # Entry expiration — zone not touched within 2 hours → delete and drop silently
-            # Not a win or loss, cooldown cleared so symbol can signal again
+            # Entry expiration — zone not touched within 2h → delete silently
             if now - s["sent_at"] > ENTRY_EXPIRY_S:
                 print(f"  [REACT] {key} — entry expired (zone not touched in 2h), deleting message")
                 delete_message(msg_id)
-                _fired_signals.pop(key, None)   # clear cooldown
+                _fired_signals.pop(key, None)
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
 
             if direction == "long":
-                in_zone      = price <= zone_high
-                past_sl      = price <= sl
-                tp1_pre_entry = price >= tp1   # price ran up to TP1 before dropping into zone
+                # Zone touch: bar_low dipped into the zone (bar_low <= zone_high)
+                in_zone       = bar_low  <= zone_high
+                past_sl       = bar_low  <= sl
+                tp1_pre_entry = bar_high >= tp1   # bar spiked to TP1 without entering zone
             else:
-                in_zone      = price >= zone_low
-                past_sl      = price >= sl
-                tp1_pre_entry = price <= tp1   # price fell to TP1 before rising into zone
+                # Zone touch: bar_high rose into the zone (bar_high >= zone_low)
+                in_zone       = bar_high >= zone_low
+                past_sl       = bar_high >= sl
+                tp1_pre_entry = bar_low  <= tp1   # bar dropped to TP1 without entering zone
 
-            # ── Pre-entry SL hit: price blew through zone AND past SL ────────
-            # e.g. long: zone 50-55, sl 47 — price drops straight to 46
-            # e.g. short: zone 60-65, sl 68 — price spikes straight to 69
+            # Pre-entry SL: bar blew through zone AND past SL in same move
             if in_zone and past_sl:
-                print(f"  [REACT] {key} — SL hit before entry zone filled "
-                      f"({fmt_price(price)}) — reacting 😢")
+                print(f"  [REACT] {key} — SL hit before entry zone filled — reacting 😢")
                 react_to_message(msg_id, "😢")
                 record_outcome(s["symbol"], s.get("combos_hit", []), "missed")
-                _fired_signals.pop(key, None)   # clear cooldown so symbol can signal again
+                _fired_signals.pop(key, None)
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
 
-            # ── Pre-entry TP1 hit: price moved in our favor without filling ──
-            # e.g. long: zone 50-55, tp1 57 — price jumps straight to 57+
-            # e.g. short: zone 60-65, tp1 58 — price drops straight to 58
+            # Pre-entry TP1: bar moved in our favour but zone was never touched
             elif tp1_pre_entry and not in_zone:
-                print(f"  [REACT] {key} — TP1 hit before entry zone filled "
-                      f"({fmt_price(price)}) — reacting 😢")
+                print(f"  [REACT] {key} — TP1 hit before entry zone filled — reacting 😢")
                 react_to_message(msg_id, "😢")
                 record_outcome(s["symbol"], s.get("combos_hit", []), "missed")
-                _fired_signals.pop(key, None)   # clear cooldown so symbol can signal again
+                _fired_signals.pop(key, None)
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
 
             elif in_zone:
                 s["entered"] = True
-                print(f"  [REACT] {key} — entry zone touched at {fmt_price(price)} "
+                print(f"  [REACT] {key} — entry zone touched "
                       f"(zone: {fmt_price(zone_low)}–{fmt_price(zone_high)})")
             else:
-                print(f"  [REACT WAIT] {key} | price={fmt_price(price)} "
-                      f"| waiting for zone {fmt_price(zone_low)}–{fmt_price(zone_high)}")
-                continue   # zone not touched yet
+                print(f"  [REACT WAIT] {key} | waiting for zone "
+                      f"{fmt_price(zone_low)}–{fmt_price(zone_high)}")
+                continue
 
-        # ── Phase 2: Monitor TP / SL ──────────────────────────────────────────
-        print(f"  [REACT CHECK] {key} | price={fmt_price(price)} "
-              f"| sl={fmt_price(sl)} tp1={fmt_price(tp1)} tp2={fmt_price(tp2)}")
+        # ── Phase 2: Monitor TP / SL (intrabar-aware) ─────────────────────────
+        print(f"  [REACT CHECK] {key} | sl={fmt_price(sl)} "
+              f"tp1={fmt_price(tp1)} tp2={fmt_price(tp2)}")
 
         if direction == "long":
-            sl_hit  = price <= sl
-            tp1_hit = price >= tp1
-            tp2_hit = price >= tp2
+            sl_hit  = bar_low  <= sl
+            tp1_hit = bar_high >= tp1
+            tp2_hit = bar_high >= tp2
         else:
-            sl_hit  = price >= sl
-            tp1_hit = price <= tp1
-            tp2_hit = price <= tp2
+            sl_hit  = bar_high >= sl
+            tp1_hit = bar_low  <= tp1
+            tp2_hit = bar_low  <= tp2
 
+        # Priority: if both TP2 and SL are inside the same bar range,
+        # we favour TP2 (price had to pass through TP2 to reach SL on the way back).
         if tp2_hit:
             if not s["tp1_hit"]:
                 react_to_message(msg_id, "🔥")
@@ -1531,13 +1558,20 @@ def check_reactions() -> None:
             s["resolved"] = True
             to_drop.append(key)
 
+        elif sl_hit and tp1_hit and not s["tp1_hit"]:
+            # Both SL and TP1 touched in same bar — favour TP1 hit first
+            # (price had to pass TP1 before reversing to SL)
+            react_to_message(msg_id, "🔥")
+            react_to_message(msg_id, "😭")
+            record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
+            s["resolved"] = True
+            to_drop.append(key)
+
         elif sl_hit:
             if not s["tp1_hit"]:
-                # Clean loss — SL hit before TP1
                 react_to_message(msg_id, "😭")
                 record_outcome(s["symbol"], s.get("combos_hit", []), "loss")
             else:
-                # TP1 was already hit, SL hit after — partial win, still resolve
                 react_to_message(msg_id, "😭")
                 record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
             s["resolved"] = True
