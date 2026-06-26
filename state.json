@@ -1,7 +1,5 @@
 {
-  "fired_signals": {
-    "TAOUSDT_short": 1782487843.7056618
-  },
+  "fired_signals": {},
   "active_signals": {
     "HYPEUSDT_short": {
       "symbol": "HYPEUSDT",
@@ -48,5 +46,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782501319.5733273
+  "last_scan_ts": 1782502223.8753788
 }
