@@ -1306,7 +1306,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v7 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
+        f"\n<i>SMC Signal Engine v8 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
     )
     return msg
 
