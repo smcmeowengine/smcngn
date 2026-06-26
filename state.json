@@ -4,7 +4,6 @@
     "ETHUSDT_short": 1782478866.5126245,
     "AVAXUSDT_short": 1782479753.66662,
     "LINKUSDT_short": 1782479754.8577526,
-    "APTUSDT_short": 1782482462.1671906,
     "HYPEUSDT_short": 1782482463.2121732,
     "XRPUSDT_short": 1782483339.6106884,
     "UNIUSDT_short": 1782483340.6526902,
@@ -13,29 +12,6 @@
     "TAOUSDT_short": 1782487843.7056618
   },
   "active_signals": {
-    "APTUSDT_short": {
-      "symbol": "APTUSDT",
-      "direction": "short",
-      "exact_entry": 0.60355,
-      "entry_zone_high": 0.6045,
-      "entry_zone_low": 0.6021,
-      "stop_loss": 0.64327,
-      "take_profit_1": 0.5241100000000001,
-      "take_profit_2": 0.4843900000000001,
-      "combos_hit": [
-        "HTF_BIAS",
-        "4H_OB",
-        "FVG",
-        "LIQ_SWEEP",
-        "15M_OB_FVG",
-        "FIB_LEVEL"
-      ],
-      "message_id": 923,
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782482462.1671963
-    },
     "HYPEUSDT_short": {
       "symbol": "HYPEUSDT",
       "direction": "short",
@@ -147,5 +123,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782489633.9098952
+  "last_scan_ts": 1782490519.058051
 }
