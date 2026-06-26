@@ -66,6 +66,11 @@ BTC_BEAR_EMA_SLOW         = 50
 # Drop signals whose TP2 reward-to-risk is below 1:3
 TP2_MIN_RR                = 2.5
 
+# ── ENTRY ZONE PROXIMITY GATE ─────────────────────────────────────────────────
+# Drop signals where the entry zone midpoint is more than N× ATR_15m away from
+# current price. Zones too far away will almost never fill within the 2h expiry.
+ENTRY_ZONE_MAX_ATR_DISTANCE = 2.0   # tune up to loosen, down to tighten
+
 # ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
 SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
@@ -931,6 +936,39 @@ def compute_smc_signal(symbol: str,
         grade = "B"
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # ── Stale signal gate ────────────────────────────────────────────────────
+    # Current price must be between SL and TP1 — if the move has already started
+    # (price past TP1) or already stopped out (price past SL), the setup is stale.
+    if direction == "long":
+        if cur_p >= tp1:
+            print(f"  [GATE] {symbol} LONG rejected — price {fmt_price(cur_p)} "
+                  f"already at/past TP1 {fmt_price(tp1)}")
+            return None
+        if cur_p <= stop_loss:
+            print(f"  [GATE] {symbol} LONG rejected — price {fmt_price(cur_p)} "
+                  f"already at/past SL {fmt_price(stop_loss)}")
+            return None
+    else:
+        if cur_p <= tp1:
+            print(f"  [GATE] {symbol} SHORT rejected — price {fmt_price(cur_p)} "
+                  f"already at/past TP1 {fmt_price(tp1)}")
+            return None
+        if cur_p >= stop_loss:
+            print(f"  [GATE] {symbol} SHORT rejected — price {fmt_price(cur_p)} "
+                  f"already at/past SL {fmt_price(stop_loss)}")
+            return None
+
+    # ── Entry zone proximity gate ────────────────────────────────────────────
+    # Reject if the entry zone midpoint is too far from current price.
+    zone_mid      = (entry_high + entry_low) / 2
+    zone_distance = abs(zone_mid - cur_p)
+    max_distance  = atr_15m * ENTRY_ZONE_MAX_ATR_DISTANCE
+    if zone_distance > max_distance:
+        print(f"  [GATE] {symbol} {direction.upper()} rejected — entry zone midpoint "
+              f"{fmt_price(zone_mid)} is {zone_distance:.6f} from price {fmt_price(cur_p)} "
+              f"(max allowed {max_distance:.6f} = {ENTRY_ZONE_MAX_ATR_DISTANCE}× ATR)")
+        return None
 
     return SMCSignal(
         symbol=symbol,
