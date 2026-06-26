@@ -1,7 +1,5 @@
 {
   "fired_signals": {
-    "UNIUSDT_short": 1782483340.6526902,
-    "LTCUSDT_short": 1782484249.023801,
     "SUIUSDT_short": 1782486051.17223,
     "TAOUSDT_short": 1782487843.7056618
   },
@@ -51,5 +49,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782497717.7595098
+  "last_scan_ts": 1782499517.1228728
 }
