@@ -46,7 +46,7 @@
       ],
       "message_id": 909,
       "entered": true,
-      "tp1_hit": false,
+      "tp1_hit": true,
       "resolved": false,
       "sent_at": 1782471663.8459926
     },
