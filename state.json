@@ -1,6 +1,5 @@
 {
   "fired_signals": {
-    "HYPEUSDT_short": 1782482463.2121732,
     "UNIUSDT_short": 1782483340.6526902,
     "LTCUSDT_short": 1782484249.023801,
     "SUIUSDT_short": 1782486051.17223,
@@ -52,5 +51,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782496829.7313306
+  "last_scan_ts": 1782497717.7595098
 }
