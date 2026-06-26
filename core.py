@@ -1466,23 +1466,40 @@ def check_reactions() -> None:
                 continue
 
             if direction == "long":
-                # Zone touched when price drops into the zone (price <= zone_high)
-                in_zone = price <= zone_high
-                past_sl = price <= sl
+                in_zone      = price <= zone_high
+                past_sl      = price <= sl
+                tp1_pre_entry = price >= tp1   # price ran up to TP1 before dropping into zone
             else:
-                # Zone touched when price rises into the zone (price >= zone_low)
-                in_zone = price >= zone_low
-                past_sl = price >= sl
+                in_zone      = price >= zone_low
+                past_sl      = price >= sl
+                tp1_pre_entry = price <= tp1   # price fell to TP1 before rising into zone
 
+            # ── Pre-entry SL hit: price blew through zone AND past SL ────────
+            # e.g. long: zone 50-55, sl 47 — price drops straight to 46
+            # e.g. short: zone 60-65, sl 68 — price spikes straight to 69
             if in_zone and past_sl:
-                # Price blew straight through zone and hit SL — skip as invalid fill
-                print(f"  [REACT] {key} — price blew through zone+SL "
-                      f"({fmt_price(price)}) — not a valid fill, deleting message")
-                delete_message(msg_id)
-                _fired_signals.pop(key, None)   # clear cooldown
+                print(f"  [REACT] {key} — SL hit before entry zone filled "
+                      f"({fmt_price(price)}) — reacting 😢")
+                react_to_message(msg_id, "😢")
+                record_outcome(s["symbol"], s.get("combos_hit", []), "missed")
+                _fired_signals.pop(key, None)   # clear cooldown so symbol can signal again
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
+
+            # ── Pre-entry TP1 hit: price moved in our favor without filling ──
+            # e.g. long: zone 50-55, tp1 57 — price jumps straight to 57+
+            # e.g. short: zone 60-65, tp1 58 — price drops straight to 58
+            elif tp1_pre_entry and not in_zone:
+                print(f"  [REACT] {key} — TP1 hit before entry zone filled "
+                      f"({fmt_price(price)}) — reacting 😢")
+                react_to_message(msg_id, "😢")
+                record_outcome(s["symbol"], s.get("combos_hit", []), "missed")
+                _fired_signals.pop(key, None)   # clear cooldown so symbol can signal again
+                s["resolved"] = True
+                to_drop.append(key)
+                continue
+
             elif in_zone:
                 s["entered"] = True
                 print(f"  [REACT] {key} — entry zone touched at {fmt_price(price)} "
@@ -1575,13 +1592,16 @@ def save_win_rate() -> None:
 
 def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     """
-    outcome: "win" (TP2 hit) | "tp1" (TP1 hit, not TP2) | "loss" (SL hit)
+    outcome: "win"    (TP2 hit)
+             "tp1"    (TP1 hit, not TP2)
+             "loss"   (SL hit after entry)
+             "missed" (SL or TP1 hit before entry zone was ever filled — 😢)
     """
     combo_key = "+".join(sorted(combos)) if combos else "unknown"
 
     for bucket, key in [("by_symbol", symbol), ("by_combo", combo_key)]:
         if key not in _win_rate_data[bucket]:
-            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0}
+            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0}
         entry = _win_rate_data[bucket][key]
         if outcome == "win":
             entry["wins"] += 1
@@ -1589,6 +1609,9 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
             entry["losses"] += 1
         elif outcome == "tp1":
             entry["tp1s"] += 1
+        elif outcome == "missed":
+            entry.setdefault("missed", 0)
+            entry["missed"] += 1
 
     t = _win_rate_data["total"]
     if outcome == "win":
@@ -1597,11 +1620,15 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
         t["losses"] += 1
     elif outcome == "tp1":
         t["tp1s"] += 1
+    elif outcome == "missed":
+        t.setdefault("missed", 0)
+        t["missed"] += 1
 
     total_trades = t["wins"] + t["losses"]
     wr = (t["wins"] / total_trades * 100) if total_trades else 0
+    missed = t.get("missed", 0)
     print(f"  [WIN RATE] {symbol} → {outcome.upper()} | "
-          f"Overall: {t['wins']}W / {t['losses']}L = {wr:.1f}% WR")
+          f"Overall: {t['wins']}W / {t['losses']}L = {wr:.1f}% WR | Missed: {missed}")
     save_win_rate()
 
 
@@ -1610,11 +1637,12 @@ def get_win_rate_summary() -> str:
     t = _win_rate_data.get("total", {})
     wins, losses = t.get("wins", 0), t.get("losses", 0)
     tp1s         = t.get("tp1s", 0)
+    missed       = t.get("missed", 0)
     total        = wins + losses
     if total == 0:
         return "No closed trades yet."
     wr = wins / total * 100
-    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s}"]
+    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s} | 😢 Missed entries: {missed}"]
     # Top 3 symbols by win rate (min 2 trades)
     by_sym = _win_rate_data.get("by_symbol", {})
     ranked = [(s, d) for s, d in by_sym.items() if d["wins"] + d["losses"] >= 2]
