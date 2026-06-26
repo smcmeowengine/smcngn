@@ -1,4 +1,30 @@
 {
-  "fired_signals": {},
-  "active_signals": {}
+  "fired_signals": {
+    "APTUSDT_short": 1782462659.0423713
+  },
+  "active_signals": {
+    "APTUSDT_short": {
+      "symbol": "APTUSDT",
+      "direction": "short",
+      "exact_entry": 0.6008,
+      "entry_zone_high": 0.6022,
+      "entry_zone_low": 0.6003,
+      "stop_loss": 0.6059785714285714,
+      "take_profit_1": 0.5904428571428573,
+      "take_profit_2": 0.5852642857142859,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 901,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782462659.0423777
+    }
+  }
 }
