@@ -1,7 +1,5 @@
 {
   "fired_signals": {
-    "AVAXUSDT_short": 1782479753.66662,
-    "LINKUSDT_short": 1782479754.8577526,
     "HYPEUSDT_short": 1782482463.2121732,
     "UNIUSDT_short": 1782483340.6526902,
     "LTCUSDT_short": 1782484249.023801,
@@ -54,5 +52,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782494119.8416777
+  "last_scan_ts": 1782495025.2689805
 }
