@@ -80,14 +80,14 @@ TP2_MIN_RR                = 2.5
 # ── ENTRY ZONE PROXIMITY GATE ─────────────────────────────────────────────────
 # Drop signals where the entry zone midpoint is more than N× ATR_15m away from
 # current price. Zones too far away will almost never fill within the 2h expiry.
-ENTRY_ZONE_MAX_ATR_DISTANCE = 2.0   # tune up to loosen, down to tighten
+ENTRY_ZONE_MAX_ATR_DISTANCE = 1.2   # tune up to loosen, down to tighten
 
 # ── ENTRY ZONE % DISTANCE GATE (run_scan) ─────────────────────────────────────
 # Second, independent proximity gate applied later in run_scan(): drop signals
 # whose entry zone top/bottom is more than this % away from current price.
 # Units differ from ENTRY_ZONE_MAX_ATR_DISTANCE above (% vs ATR multiples) —
 # both gates are applied at different stages; a signal must pass both.
-MAX_ENTRY_DIST_PCT = 2.5   # max % distance from current price to entry zone top/bottom
+MAX_ENTRY_DIST_PCT = 1.2   # max % distance from current price to entry zone top/bottom
 
 # ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
@@ -99,10 +99,10 @@ WIN_RATE_FILE = pathlib.Path("win_rate.json")
 # ── SMC PARAMETERS ───────────────────────────────────────────────────────────
 OB_LOOKBACK        = 50
 OB_MIN_MOVE_ATR    = 1.5
-OB_MAX_AGE_BARS    = 40
+OB_MAX_AGE_BARS    = 20
 OB_IMPULSE_LOOKFORWARD = 8   # IMP-08: bars to look ahead for impulse move (was hardcoded 3)
 FVG_MIN_SIZE_ATR   = 0.3
-FVG_MAX_AGE_BARS   = 30
+FVG_MAX_AGE_BARS   = 10
 SWEEP_LOOKBACK     = 30
 EQUAL_HL_TOLERANCE = 0.002
 MSB_LOOKBACK       = 20
@@ -119,9 +119,9 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is 8: 6 base factors + 1 Fib confluence + 1 Fib golden zone bonus
-MIN_CONFLUENCE_SCORE  = 6
-STRONG_SIGNAL_SCORE   = 5
-APLUS_SIGNAL_SCORE    = 6
+MIN_CONFLUENCE_SCORE  = 5   # was 6; HTF_BIAS no longer contributes a point
+STRONG_SIGNAL_SCORE   = 4
+APLUS_SIGNAL_SCORE    = 5
 
 # ── INTERVAL MAP ─────────────────────────────────────────────────────────────
 INTERVAL_MS = {
@@ -663,6 +663,11 @@ def get_htf_bias(candles_4h: list[dict]) -> str:
         return "neutral"
     cur    = closes[-1]
     e21, e50 = ema21[-1], ema50[-1]
+    # FIX 6: require minimum EMA separation to avoid choppy/directionless markets
+    ema_sep = abs(e21 - e50)
+    atr_4h  = calc_atr(candles_4h, ATR_LEN)
+    if ema_sep < atr_4h * 0.3:
+        return "neutral"   # EMAs too close — bias not established
     if cur > e21 > e50 and ema21[-1] > ema21[-3] and ema50[-1] > ema50[-3]:
         return "bull"
     if cur < e21 < e50 and ema21[-1] < ema21[-3] and ema50[-1] < ema50[-3]:
@@ -689,14 +694,18 @@ def find_order_blocks(candles: list[dict], timeframe: str,
             if move_up >= atr * OB_MIN_MOVE_ATR:
                 # BUG-10 fix: price must be above zone_high for a bull OB re-test
                 if cur_price > cur["h"]:
-                    valid.append(OrderBlock(cur["h"], cur["l"], "bull", i, timeframe))
+                    # FIX 4: bull OB uses lower half only (strongest demand)
+                    zone_mid = (cur["h"] + cur["l"]) / 2
+                    valid.append(OrderBlock(zone_mid, cur["l"], "bull", i, timeframe))
 
         if bias in ("bear", "neutral") and cur["c"] > cur["o"]:
             move_dn = cur["l"] - min(candles[j]["l"] for j in range(i+1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n)))
             if move_dn >= atr * OB_MIN_MOVE_ATR:
                 # BUG-10 fix: price must be below zone_low for a bear OB re-test
                 if cur_price < cur["l"]:
-                    valid.append(OrderBlock(cur["h"], cur["l"], "bear", i, timeframe))
+                    # FIX 4: bear OB uses upper half only (strongest supply)
+                    zone_mid = (cur["h"] + cur["l"]) / 2
+                    valid.append(OrderBlock(cur["h"], zone_mid, "bear", i, timeframe))
 
     return valid
 
@@ -810,12 +819,29 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
 # EXACT ENTRY PRICE LOGIC
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def get_entry_bias(symbol: str) -> str:
+    """
+    Return 'aggressive' if this symbol has a high recent missed-signal rate.
+    'aggressive' mode enters at zone top (longs) or zone bottom (shorts)
+    instead of the default just-inside-zone placement, reducing missed fills
+    when price tends to tap the zone and immediately reverse.
+    """
+    sym_data = _win_rate_data.get("by_symbol", {}).get(symbol, {})
+    missed   = sym_data.get("missed", 0)
+    total    = (sym_data.get("wins", 0) + sym_data.get("losses", 0)
+                + missed + sym_data.get("tp1s", 0))
+    if total >= 5 and missed / total > 0.30:
+        return "aggressive"
+    return "normal"
+
+
 def compute_exact_entry(direction: str,
                          entry_zone_high: float,
                          entry_zone_low: float,
                          fib: FibResult | None,
                          sweep: dict | None,
-                         atr_15m: float) -> tuple[float, str]:
+                         atr_15m: float,
+                         entry_bias: str = "normal") -> tuple[float, str]:
     """
     Compute a single precise limit order price within the entry zone.
 
@@ -848,15 +874,27 @@ def compute_exact_entry(direction: str,
     if sweep and entry_zone_low <= sweep["level"] <= entry_zone_high:
         return round(sweep["level"], 8), f"Sweep level = {fmt_price(sweep['level'])}"
 
-    # Priority 4: Conservative zone placement
-    if direction == "long":
-        # Enter at 67th percentile of zone (upper third) — IMP-06: was labelled "upper 30%" but 0.67 = upper third
-        price = entry_zone_low + zone_size * 0.67
+    # Priority 4: Zone placement based on historical fill behavior
+    if entry_bias == "aggressive":
+        if direction == "long":
+            price = entry_zone_high   # enter exactly at zone top
+            reason = "Zone top (aggressive — high missed rate)"
+        else:
+            price = entry_zone_low
+            reason = "Zone bottom (aggressive — high missed rate)"
     else:
-        # Enter at 33rd percentile of zone (lower third)
-        price = entry_zone_high - zone_size * 0.67
+        if direction == "long":
+            # Enter near top of demand zone; fills on first touch rather than
+            # waiting for a deep pullback that may never come
+            price = entry_zone_high - atr_15m * 0.1
+            reason = "Zone top minus buffer"
+        else:
+            # Enter near bottom of supply zone; fills when price spikes up
+            # into zone and rejects from the underside
+            price = entry_zone_low + atr_15m * 0.1
+            reason = "Zone bottom plus buffer"
 
-    return round(price, 8), "Zone midpoint (conservative)"
+    return round(price, 8), reason
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -905,7 +943,7 @@ def compute_smc_signal(symbol: str,
     if bias_1d != "neutral" and bias_1d != bias:
         return None   # 4H and 1D disagree — skip
 
-    score = 1
+    score = 0
     combos = ["HTF_BIAS"]
     details: dict = {"htf_bias": bias, "bias_1d": bias_1d}
 
@@ -1001,9 +1039,8 @@ def compute_smc_signal(symbol: str,
         entry_high, entry_low = near_ob.price_high, near_ob.price_low
         entry_src = "4H OB"
     else:
-        entry_high = cur_p + atr_15m * 0.3
-        entry_low  = cur_p - atr_15m * 0.3
-        entry_src  = "ATR zone"
+        # No structural zone found — do not fabricate one
+        return None
     details["entry_source"] = entry_src
 
     # ── IMP-01 fix: guard against zero/flat ATR and zero-width or inverted
@@ -1018,7 +1055,12 @@ def compute_smc_signal(symbol: str,
         return None
 
     # ── Step 7: Fibonacci Confluence ─────────────────────────────────────────
-    fib = find_fib_confluence(candles_4h, direction, entry_high, entry_low)
+    # FIX 8: require at least 4 non-Fib factors before Fibonacci can add its bonus
+    NON_FIB_MIN = 4   # require at least 4 real confluence factors before fib bonus
+    if score < NON_FIB_MIN:
+        fib = None   # fib cannot rescue a weak setup
+    else:
+        fib = find_fib_confluence(candles_4h, direction, entry_high, entry_low)
     if fib:
         if fib.in_golden_zone:
             score += 2            # Golden zone = double bonus
@@ -1045,21 +1087,22 @@ def compute_smc_signal(symbol: str,
         return None
 
     # ── Exact Entry Price ────────────────────────────────────────────────────
+    entry_bias = get_entry_bias(symbol)
     exact_entry, entry_reason = compute_exact_entry(
-        direction, entry_high, entry_low, fib, sweep, atr_15m
+        direction, entry_high, entry_low, fib, sweep, atr_15m, entry_bias
     )
     details["exact_entry_reason"] = entry_reason
 
     # ── Stop Loss ────────────────────────────────────────────────────────────
     if direction == "long":
-        sl_base = entry_low - atr_15m * 1.0
+        sl_base = entry_low - atr_15m * 1.5
         if sweep:
             sl_base = min(sl_base, sweep["level"] - atr_1h * 0.3)
         if fib:
             sl_base = min(sl_base, fib.fib_786 - atr_4h * 0.2)
         stop_loss = sl_base
     else:
-        sl_base = entry_high + atr_15m * 1.0
+        sl_base = entry_high + atr_15m * 1.5
         if sweep:
             sl_base = max(sl_base, sweep["level"] + atr_1h * 0.3)
         if fib:
@@ -1091,6 +1134,10 @@ def compute_smc_signal(symbol: str,
             tp2 = max(highs_4h) if highs_4h else exact_entry + risk * 4.0
         if tp2 < tp1:
             tp2 = exact_entry + risk * 3.0
+        # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
+        tp2_max = exact_entry + risk * 4.0
+        if tp2 > tp2_max:
+            tp2 = tp2_max   # cap unreachable swing highs
     else:
         risk      = stop_loss - exact_entry
         tp1       = exact_entry - risk * 2.0
@@ -1107,6 +1154,10 @@ def compute_smc_signal(symbol: str,
             tp2 = min(lows_4h) if lows_4h else exact_entry - risk * 4.0
         if tp2 > tp1:
             tp2 = exact_entry - risk * 3.0
+        # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
+        tp2_max = exact_entry - risk * 4.0
+        if tp2 < tp2_max:
+            tp2 = tp2_max   # cap unreachable swing lows
 
     # ── Grade ────────────────────────────────────────────────────────────────
     if score >= APLUS_SIGNAL_SCORE:
@@ -1353,6 +1404,18 @@ TOP_N_SIGNALS = 5   # Only send the best N signals per scan
 # Direction cap: max longs / shorts in the final batch (correlation guard)
 MAX_SAME_DIRECTION = 2
 
+# Sector groupings for correlation cap
+SECTOR_GROUPS = {
+    "layer1":  ["SOLUSDT", "NEARUSDT", "APTUSDT", "SUIUSDT", "AVAXUSDT",
+                 "ADAUSDT", "DOTUSDT", "XLMUSDT"],
+    "defi":    ["AAVEUSDT", "UNIUSDT", "PENDLEUSDT", "ONDOUSDT"],
+    "btc_eth": ["BTCUSDT", "ETHUSDT"],
+    "meme":    ["DOGEUSDT", "PENGUUSDT"],
+    "other":   ["HYPEUSDT", "ZECUSDT", "BNBUSDT", "TRXUSDT", "BCHUSDT",
+                 "TAOUSDT", "LINKUSDT", "XRPUSDT", "LTCUSDT", "UNIUSDT"],
+}
+MAX_PER_SECTOR = 1   # max signals from any one sector per scan
+
 
 def fetch_all_mids() -> dict[str, float]:
     """Fetch all mid prices in a single API call. Returns {coin: price}."""
@@ -1427,13 +1490,37 @@ def run_scan(all_mids: dict | None = None) -> None:
         if sig:
             # BTC regime: block altcoin longs (allow BTC itself through)
             if btc_bear and sig.direction == "long" and symbol != BTC_SYMBOL:
-                print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
-                continue
+                is_strong_breakout = (
+                    sig.signal_grade == "A+"
+                    and "15M_MSB" in sig.combos_hit
+                    and "LIQ_SWEEP" in sig.combos_hit
+                    and sig.confluence >= 7
+                    and sig.details.get("bias_1d", "bear") != "bear"
+                )
+                if is_strong_breakout:
+                    print(f"  [REGIME OVERRIDE] {symbol} LONG allowed — "
+                          f"strong independent breakout despite BTC bear "
+                          f"(confluence {sig.confluence}, 1D={sig.details.get('bias_1d')})")
+                else:
+                    print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
+                    continue
             # IMP-03: block altcoin shorts when BTC is in a strong bull regime
             if btc_bull and sig.direction == "short" and symbol != BTC_SYMBOL:
                 if BTC_REGIME_BLOCKS_SHORTS:
-                    print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime (BTC_REGIME_BLOCKS_SHORTS=True)")
-                    continue
+                    is_strong_breakdown = (
+                        sig.signal_grade == "A+"
+                        and "15M_MSB" in sig.combos_hit
+                        and "LIQ_SWEEP" in sig.combos_hit
+                        and sig.confluence >= 7
+                        and sig.details.get("bias_1d", "bull") != "bull"
+                    )
+                    if is_strong_breakdown:
+                        print(f"  [REGIME OVERRIDE] {symbol} SHORT allowed — "
+                              f"strong independent breakdown despite BTC bull "
+                              f"(confluence {sig.confluence}, 1D={sig.details.get('bias_1d')})")
+                    else:
+                        print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime")
+                        continue
                 else:
                     print(f"  [BTC REGIME] {symbol} SHORT allowed — BTC_REGIME_BLOCKS_SHORTS=False")
             if is_duplicate(sig):
@@ -1494,8 +1581,23 @@ def run_scan(all_mids: dict | None = None) -> None:
                 print(f"  [DIR CAP] {sig.symbol} SHORT dropped — "
                       f"already have {short_count} shorts in batch")
 
+    # ── Sector Cap (correlation guard) ───────────────────────────────────────
+    sector_counts: dict[str, int] = {}
+    sector_capped: list[SMCSignal] = []
+    for sig in capped:
+        sym_sector = next(
+            (s for s, syms in SECTOR_GROUPS.items() if sig.symbol in syms),
+            "other"
+        )
+        if sector_counts.get(sym_sector, 0) < MAX_PER_SECTOR:
+            sector_capped.append(sig)
+            sector_counts[sym_sector] = sector_counts.get(sym_sector, 0) + 1
+        else:
+            print(f"  [SECTOR CAP] {sig.symbol} dropped — "
+                  f"already have {MAX_PER_SECTOR} signal(s) from '{sym_sector}'")
+
     # Final top-N slice
-    final = capped[:TOP_N_SIGNALS]
+    final = sector_capped[:TOP_N_SIGNALS]
 
     if not final:
         print("  [SCAN] No signals this round.")
@@ -1682,6 +1784,7 @@ def track_active_signal(sig: SMCSignal, message_id: int) -> None:
         "take_profit_2":   sig.take_profit_2,
         "combos_hit":      sig.combos_hit,
         "message_id":      message_id,
+        "signal_grade":    sig.signal_grade,   # FIX 11: store grade for grade-aware expiry
         "entered":         False,
         "tp1_hit":         False,
         "resolved":        False,
@@ -1750,9 +1853,11 @@ def check_reactions(all_mids: dict) -> None:
         # ── Phase 1: Waiting for entry zone touch ─────────────────────────────
         if not s["entered"]:
 
-            # Entry expiration — zone not touched within 2h → delete silently
-            if now - s["sent_at"] > ENTRY_EXPIRY_S:
-                print(f"  [REACT] {key} — entry expired (zone not touched in 2h), deleting message")
+            # Entry expiration — grade-aware: A+ signals get 4 hours, others get 2 hours
+            grade        = s.get("signal_grade", "B")
+            expiry_s     = 4 * 60 * 60 if grade == "A+" else ENTRY_EXPIRY_S
+            if now - s["sent_at"] > expiry_s:
+                print(f"  [REACT] {key} — entry expired (zone not touched in {expiry_s//3600}h), deleting message")
                 delete_message(msg_id)
                 _fired_signals.pop(key, None)
                 s["resolved"] = True
