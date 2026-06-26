@@ -8,7 +8,9 @@
     "AVAXUSDT_short": 1782479753.66662,
     "LINKUSDT_short": 1782479754.8577526,
     "APTUSDT_short": 1782482462.1671906,
-    "HYPEUSDT_short": 1782482463.2121732
+    "HYPEUSDT_short": 1782482463.2121732,
+    "XRPUSDT_short": 1782483339.6106884,
+    "UNIUSDT_short": 1782483340.6526902
   },
   "active_signals": {
     "APTUSDT_short": {
@@ -55,7 +57,51 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782482463.2121801
+    },
+    "XRPUSDT_short": {
+      "symbol": "XRPUSDT",
+      "direction": "short",
+      "exact_entry": 1.048951,
+      "entry_zone_high": 1.0521,
+      "entry_zone_low": 1.0474,
+      "stop_loss": 1.0593285714285714,
+      "take_profit_1": 1.028195857142857,
+      "take_profit_2": 1.0086,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 925,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782483339.610695
+    },
+    "UNIUSDT_short": {
+      "symbol": "UNIUSDT",
+      "direction": "short",
+      "exact_entry": 2.904905,
+      "entry_zone_high": 2.9106,
+      "entry_zone_low": 2.9021,
+      "stop_loss": 2.9363928571428572,
+      "take_profit_1": 2.841929285714285,
+      "take_profit_2": 2.7252,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 926,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782483340.6526968
     }
   },
-  "last_scan_ts": 1782482441.164188
+  "last_scan_ts": 1782483318.6277957
 }
