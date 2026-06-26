@@ -68,7 +68,7 @@
         "FIB_GOLDEN"
       ],
       "message_id": 911,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782472564.7152922
