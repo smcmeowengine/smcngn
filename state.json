@@ -2,7 +2,9 @@
   "fired_signals": {
     "PENDLEUSDT_short": 1782471662.6737607,
     "BNBUSDT_short": 1782471663.8459873,
-    "DOTUSDT_short": 1782472564.715287
+    "DOTUSDT_short": 1782472564.715287,
+    "BTCUSDT_short": 1782478865.497472,
+    "ETHUSDT_short": 1782478866.5126245
   },
   "active_signals": {
     "DOTUSDT_short": {
@@ -27,6 +29,54 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782472564.7152922
+    },
+    "BTCUSDT_short": {
+      "symbol": "BTCUSDT",
+      "direction": "short",
+      "exact_entry": 59690.458,
+      "entry_zone_high": 59707.0,
+      "entry_zone_low": 59432.0,
+      "stop_loss": 60023.57142857143,
+      "take_profit_1": 59024.23114285714,
+      "take_profit_2": 58691.11771428571,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_MSB",
+        "15M_OB_FVG",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 915,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782478865.497477
+    },
+    "ETHUSDT_short": {
+      "symbol": "ETHUSDT",
+      "direction": "short",
+      "exact_entry": 1542.672,
+      "entry_zone_high": 1548.5,
+      "entry_zone_low": 1541.7,
+      "stop_loss": 1565.175,
+      "take_profit_1": 1497.6660000000002,
+      "take_profit_2": 1475.1630000000002,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_MSB",
+        "15M_OB_FVG",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 916,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782478866.512628
     }
   }
 }
