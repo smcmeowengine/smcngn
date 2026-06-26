@@ -1,8 +1,5 @@
 {
-  "fired_signals": {
-    "ZECUSDT_short": 1782416753.7897081,
-    "ONDOUSDT_short": 1782416754.8397985
-  },
+  "fired_signals": {},
   "active_signals": {
     "ONDOUSDT_short": {
       "symbol": "ONDOUSDT",
