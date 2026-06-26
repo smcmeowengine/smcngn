@@ -10,7 +10,8 @@
     "APTUSDT_short": 1782482462.1671906,
     "HYPEUSDT_short": 1782482463.2121732,
     "XRPUSDT_short": 1782483339.6106884,
-    "UNIUSDT_short": 1782483340.6526902
+    "UNIUSDT_short": 1782483340.6526902,
+    "LTCUSDT_short": 1782484249.023801
   },
   "active_signals": {
     "APTUSDT_short": {
@@ -101,7 +102,29 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782483340.6526968
+    },
+    "LTCUSDT_short": {
+      "symbol": "LTCUSDT",
+      "direction": "short",
+      "exact_entry": 41.33175,
+      "entry_zone_high": 41.382,
+      "entry_zone_low": 41.307,
+      "stop_loss": 41.668857142857135,
+      "take_profit_1": 40.65753571428573,
+      "take_profit_2": 39.251,
+      "combos_hit": [
+        "HTF_BIAS",
+        "4H_OB",
+        "FVG",
+        "LIQ_SWEEP",
+        "15M_OB_FVG"
+      ],
+      "message_id": 927,
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782484249.0238059
     }
   },
-  "last_scan_ts": 1782483318.6277957
+  "last_scan_ts": 1782484227.928627
 }
