@@ -1,6 +1,5 @@
 {
   "fired_signals": {
-    "SUIUSDT_short": 1782486051.17223,
     "TAOUSDT_short": 1782487843.7056618
   },
   "active_signals": {
@@ -49,5 +48,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782499517.1228728
+  "last_scan_ts": 1782500431.1827564
 }
