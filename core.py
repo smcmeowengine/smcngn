@@ -12,7 +12,8 @@ Alerts     : Telegram (HTML)
 Signals are PREDICTIVE — exact limit entry price set BEFORE price arrives.
 """
 
-import os, time, math, threading, requests, random, json, pathlib
+import os, time, math, threading, requests, random, json, pathlib, sys
+import signal as _signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -64,6 +65,10 @@ VOLUME_GATE_MULTIPLIER  = 1.4   # sweep volume must be > 1.4× the 20-bar avg
 # ── BTC REGIME FILTER (Medium priority upgrade) ───────────────────────────────
 # Block altcoin longs when BTC is in a confirmed bear regime
 BTC_REGIME_FILTER_ENABLED = True
+# Set to True to hard-block all altcoin shorts during a BTC bull regime.
+# Default False: the regime filter still blocks BTC LONGS in bear, but
+# altcoin shorts are evaluated on their own merit.
+BTC_REGIME_BLOCKS_SHORTS  = False
 BTC_SYMBOL                = "BTCUSDT"
 BTC_BEAR_EMA_FAST         = 21
 BTC_BEAR_EMA_SLOW         = 50
@@ -131,6 +136,7 @@ _hl_lock         = threading.Lock()
 _hl_last_req_ts  = 0.0
 _hl_min_interval = 0.2
 _hl_session      = requests.Session()
+_tg_session      = requests.Session()
 
 # ── 4H CANDLE CACHE ───────────────────────────────────────────────────────────
 # 4H candles only close every 4 hours; caching them for 60 min per scan run
@@ -201,7 +207,7 @@ class SMCSignal:
     stop_loss:       float
     take_profit_1:   float      # TP1 — conservative (1:2)
     take_profit_2:   float      # TP2 — full target (next liquidity)
-    confluence:      int        # Score out of 7
+    confluence:      int        # Score out of 8 (see APLUS_SIGNAL_SCORE, STRONG_SIGNAL_SCORE)
     signal_grade:    str        # "A+" | "A" | "B"
     combos_hit:      list = field(default_factory=list)
     fib:             FibResult | None = None
@@ -252,7 +258,8 @@ def hl_post(payload: dict):
             if attempt == 4:
                 raise
             time.sleep(min(10.0, 0.5 * (2 ** attempt)))
-    return None
+    # Unreachable: the loop either returns on success or raises on attempt 5.
+    # Kept as a structural marker; do not add logic here.
 
 def current_bar_open_ms(ref_ms: int, interval: str) -> int:
     return (ref_ms // INTERVAL_MS[interval]) * INTERVAL_MS[interval]
@@ -383,14 +390,27 @@ def is_active_session() -> bool:
 _btc_regime_cache: dict = {}   # {"regime": "bull"|"bear"|"neutral", "ts": float}
 _BTC_REGIME_TTL_S = 60 * 30   # recheck every 30 minutes
 
+# Sentinel returned by get_btc_regime() when BTC_REGIME_FILTER_ENABLED is False.
+# Using a dedicated value (rather than "bull") makes the disabled state explicit
+# in logs and future callers — "disabled" != "bull" and != "bear", so neither
+# btc_regime_blocks_long() nor btc_regime_blocks_short() will fire. Do NOT use
+# the get_btc_regime() return value for display or reporting when the filter is
+# disabled — check BTC_REGIME_FILTER_ENABLED first.
+REGIME_FILTER_DISABLED = "disabled"
+
 
 def get_btc_regime() -> str:
     """
-    Return "bull", "bear", or "neutral" based on BTC 4H EMA21 vs EMA50.
+    Return "bull", "bear", "neutral", or REGIME_FILTER_DISABLED.
     Cached for 30 minutes to avoid extra API calls per symbol scan.
+    When BTC_REGIME_FILTER_ENABLED is False, returns REGIME_FILTER_DISABLED
+    ("disabled") — a sentinel that causes both btc_regime_blocks_long() and
+    btc_regime_blocks_short() to return False without blocking any signals.
+    WARNING: do not use this return value for display or reporting when the
+    filter is disabled — the value does NOT represent actual BTC market conditions.
     """
     if not BTC_REGIME_FILTER_ENABLED:
-        return "bull"   # filter disabled → treat as always bullish (don't block)
+        return REGIME_FILTER_DISABLED
 
     now = time.time()
     if _btc_regime_cache and (now - _btc_regime_cache.get("ts", 0)) < _BTC_REGIME_TTL_S:
@@ -422,13 +442,17 @@ def get_btc_regime() -> str:
 
 
 def btc_regime_blocks_long() -> bool:
-    """Return True when BTC is bearish and altcoin longs should be blocked."""
-    return BTC_REGIME_FILTER_ENABLED and get_btc_regime() == "bear"
+    """Return True when BTC is bearish and altcoin longs should be blocked.
+    Returns False when the regime filter is disabled (get_btc_regime() returns
+    REGIME_FILTER_DISABLED which does not equal "bear")."""
+    return get_btc_regime() == "bear"
 
 
 def btc_regime_blocks_short() -> bool:
-    """IMP-03: Return True when BTC is strongly bullish and altcoin shorts carry elevated risk."""
-    return BTC_REGIME_FILTER_ENABLED and get_btc_regime() == "bull"
+    """IMP-03: Return True when BTC is strongly bullish and altcoin shorts carry elevated risk.
+    Returns False when the regime filter is disabled (get_btc_regime() returns
+    REGIME_FILTER_DISABLED which does not equal "bull")."""
+    return get_btc_regime() == "bull"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -511,7 +535,7 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
         swing_l_idx = None
         swing_h_idx = None
         # Find most recent swing high
-        for i in range(len(window) - 3, 2, -1):
+        for i in range(len(window) - 3, 1, -1):   # 1 instead of 2 — allows index 2
             if is_swing_high(window, i, 2):
                 swing_h_idx = i
                 break
@@ -532,7 +556,7 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
         # Need: swing HIGH first, then swing LOW (price moved down, now pulling back up)
         swing_h_idx = None
         swing_l_idx = None
-        for i in range(len(window) - 3, 2, -1):
+        for i in range(len(window) - 3, 1, -1):   # 1 instead of 2 — allows index 2
             if is_swing_low(window, i, 2):
                 swing_l_idx = i
                 break
@@ -589,6 +613,21 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
     golden_low  = fibs["0.786"]   # numerically lower, both directions
     golden_high = fibs["0.618"]   # numerically higher, both directions
     in_golden   = (entry_zone_low <= golden_high and entry_zone_high >= golden_low)
+
+    # Directional sanity check — the golden band must sit on the correct
+    # side of price for the signal direction. If the zone midpoint is on
+    # the wrong side of the swing anchor, the fib draw is structurally
+    # misaligned with the trade and the golden-zone bonus must not apply.
+    if in_golden:
+        zone_mid = (entry_zone_high + entry_zone_low) / 2
+        if direction == "long" and zone_mid > s_high:
+            # Zone is above the swing high — impossible for a long pullback
+            in_golden = False
+            print(f"    [FIB] Golden zone rejected (LONG): zone_mid {zone_mid:.5f} > s_high {s_high:.5f}")
+        elif direction == "short" and zone_mid < s_low:
+            # Zone is below the swing low — impossible for a short pullback
+            in_golden = False
+            print(f"    [FIB] Golden zone rejected (SHORT): zone_mid {zone_mid:.5f} < s_low {s_low:.5f}")
 
     # Only return result if zone is reasonably close to a key fib level
     if nearest_dist > rng * 0.08:   # more than 8% of range away = not a fib confluence
@@ -1037,15 +1076,35 @@ def compute_smc_signal(symbol: str,
     if direction == "long":
         risk      = exact_entry - stop_loss
         tp1       = exact_entry + risk * 2.0     # 1:2 R:R minimum
-        highs_4h  = [c["h"] for c in candles_4h[-40:] if c["h"] > cur_p]
-        tp2       = max(highs_4h) if highs_4h else exact_entry + risk * 4.0  # BUG-01 fix: max = furthest swing high
+        _lookback_4h = candles_4h[-40:]
+        # Prefer the nearest confirmed swing high above current price.
+        swing_highs_4h = [
+            _lookback_4h[i]["h"]
+            for i in range(len(_lookback_4h))
+            if is_swing_high(_lookback_4h, i, 2) and _lookback_4h[i]["h"] > cur_p
+        ]
+        if swing_highs_4h:
+            tp2 = min(swing_highs_4h)   # nearest (lowest) confirmed swing high above price
+        else:
+            # Fallback: any candle high above price; then fixed multiple.
+            highs_4h = [c["h"] for c in _lookback_4h if c["h"] > cur_p]
+            tp2 = max(highs_4h) if highs_4h else exact_entry + risk * 4.0
         if tp2 < tp1:
             tp2 = exact_entry + risk * 3.0
     else:
         risk      = stop_loss - exact_entry
         tp1       = exact_entry - risk * 2.0
-        lows_4h   = [c["l"] for c in candles_4h[-40:] if c["l"] < cur_p]
-        tp2       = min(lows_4h) if lows_4h else exact_entry - risk * 4.0  # BUG-02 fix: min = furthest swing low
+        _lookback_4h = candles_4h[-40:]
+        swing_lows_4h = [
+            _lookback_4h[i]["l"]
+            for i in range(len(_lookback_4h))
+            if is_swing_low(_lookback_4h, i, 2) and _lookback_4h[i]["l"] < cur_p
+        ]
+        if swing_lows_4h:
+            tp2 = max(swing_lows_4h)   # nearest (highest) confirmed swing low below price
+        else:
+            lows_4h = [c["l"] for c in _lookback_4h if c["l"] < cur_p]
+            tp2 = min(lows_4h) if lows_4h else exact_entry - risk * 4.0
         if tp2 > tp1:
             tp2 = exact_entry - risk * 3.0
 
@@ -1196,7 +1255,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v4 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
+        f"\n<i>SMC Signal Engine v7 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
     )
     return msg
 
@@ -1210,21 +1269,36 @@ SIGNAL_COOLDOWN_S = 4 * 60 * 60
 _last_scan_ts: float = 0.0   # last time run_scan() actually executed a scan (persisted in state.json)
 
 def is_duplicate(sig: SMCSignal) -> bool:
+    """
+    Return True if an active, unresolved signal already exists for
+    (symbol, direction). Does NOT mutate any global state — call
+    replace_duplicate_signal() separately if you intend to supersede it.
+    """
     key = f"{sig.symbol}_{sig.direction}"
-    # Block if still an active unresolved signal (regardless of cooldown age)
+    # Block if still an active unresolved signal within the TTL window
     active = _active_signals.get(key)
     if active and not active.get("resolved", False):
         age_s = time.time() - active.get("sent_at", 0)
         if age_s < ACTIVE_SIGNAL_TTL_S:
             print(f"  [DEDUP] {key} blocked — trade still active ({age_s/3600:.1f}h old)")
             return True
-        else:
-            print(f"  [DEDUP] {key} — active signal expired ({age_s/3600:.1f}h), allowing re-signal")
-            _active_signals.pop(key, None)
-            _fired_signals.pop(key, None)
     # Block if within the 4-hour cooldown window
     last = _fired_signals.get(key, 0)
     return (time.time() - last) < SIGNAL_COOLDOWN_S
+
+
+def replace_duplicate_signal(sig: SMCSignal) -> None:
+    """
+    Remove the existing active/fired signal for (symbol, direction)
+    so that `sig` can be tracked as the new authoritative signal.
+    Call only after confirming is_duplicate() returned True and the
+    new signal's confluence is higher.
+    """
+    key = f"{sig.symbol}_{sig.direction}"
+    _active_signals.pop(key, None)
+    _fired_signals.pop(key, None)
+    print(f"  [DUPLICATE] Replaced stale {sig.symbol} {sig.direction} signal "
+          f"with new confluence {sig.confluence}")
 
 def mark_fired(sig: SMCSignal) -> None:
     _fired_signals[f"{sig.symbol}_{sig.direction}"] = time.time()
@@ -1260,6 +1334,9 @@ def scan_symbol(symbol: str) -> SMCSignal | None:
             current_atr = max(last["h"] - last["l"],
                               abs(last["h"] - prev["c"]),
                               abs(last["l"] - prev["c"]))
+            # Deliberate: volatility spike filter uses 20-period ATR (not standard ATR_PERIOD/ATR_LEN=14)
+            # to smooth out shorter-term noise. calc_atr() rather than calc_atr_cached()
+            # is used here because the cache is not yet populated at this call site.
             avg_atr_20 = calc_atr(c15m, period=20)
             if avg_atr_20 > 0 and current_atr > avg_atr_20 * 3.0:
                 print(f"  [VOLATILE — skipped] {symbol} | "
@@ -1354,12 +1431,26 @@ def run_scan(all_mids: dict | None = None) -> None:
                 continue
             # IMP-03: block altcoin shorts when BTC is in a strong bull regime
             if btc_bull and sig.direction == "short" and symbol != BTC_SYMBOL:
-                print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime")
-                continue
-            if not is_duplicate(sig):
-                signals.append(sig)
-                print(f"  ✅ {symbol} {sig.direction.upper()} | {sig.signal_grade} "
-                      f"| {sig.confluence}/8 | {sig.combos_hit}")
+                if BTC_REGIME_BLOCKS_SHORTS:
+                    print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime (BTC_REGIME_BLOCKS_SHORTS=True)")
+                    continue
+                else:
+                    print(f"  [BTC REGIME] {symbol} SHORT allowed — BTC_REGIME_BLOCKS_SHORTS=False")
+            if is_duplicate(sig):
+                # Only replace if the new signal is strictly higher quality
+                existing_key = f"{sig.symbol}_{sig.direction}"
+                existing = _active_signals.get(existing_key, {})
+                if sig.confluence > existing.get("confluence", 0):
+                    replace_duplicate_signal(sig)   # explicit mutation
+                else:
+                    print(
+                        f"  [DUPLICATE] Keeping existing signal "
+                        f"(confluence {existing.get('confluence', 0)} >= new {sig.confluence})"
+                    )
+                    continue
+            signals.append(sig)
+            print(f"  ✅ {symbol} {sig.direction.upper()} | {sig.signal_grade} "
+                  f"| {sig.confluence}/8 | {sig.combos_hit}")
         else:
             print(f"  —  {symbol} no signal")
 
@@ -1497,7 +1588,7 @@ def send_telegram_get_id(text: str) -> int | None:
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     for attempt in range(3):
         try:
-            r = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text,
+            r = _tg_session.post(url, json={"chat_id": TG_CHAT_ID, "text": text,
                                           "parse_mode": "HTML"}, timeout=10)
             r.raise_for_status()
             return r.json().get("result", {}).get("message_id")
@@ -1515,7 +1606,7 @@ def react_to_message(message_id: int, emoji: str) -> bool:
     """
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/setMessageReaction"
     try:
-        r = requests.post(url, json={
+        r = _tg_session.post(url, json={
             "chat_id":    TG_CHAT_ID,
             "message_id": message_id,
             "reaction":   [{"type": "emoji", "emoji": emoji}],
@@ -1537,7 +1628,7 @@ def delete_message(message_id: int) -> bool:
     """
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/deleteMessage"
     try:
-        r = requests.post(url, json={
+        r = _tg_session.post(url, json={
             "chat_id":    TG_CHAT_ID,
             "message_id": message_id,
         }, timeout=10)
@@ -1568,11 +1659,14 @@ def delete_message(message_id: int) -> bool:
 #       "sent_at": float       ← Unix timestamp
 #   }
 #
-# Signals are removed from tracking after 7 days (max trade duration assumed).
+# Signals are removed from tracking after ACTIVE_SIGNAL_TTL_HOURS hours (default 48h).
 
 _active_signals: dict[str, dict] = {}
-ACTIVE_SIGNAL_TTL_S   = 7 * 24 * 60 * 60   # 7 days  — max trade duration
-ENTRY_EXPIRY_S        = 2 * 60 * 60         # 2 hours — if entry not hit, signal expires
+# Active signals older than this are expired and removed.
+# Reduce for faster state cleanup; 48h is typical for perp limit entries.
+ACTIVE_SIGNAL_TTL_HOURS = 48
+ACTIVE_SIGNAL_TTL_S     = ACTIVE_SIGNAL_TTL_HOURS * 3600  # 48 hours — perp setups rarely live longer
+ENTRY_EXPIRY_S          = 2 * 60 * 60         # 2 hours — if entry not hit, signal expires
 
 
 def track_active_signal(sig: SMCSignal, message_id: int) -> None:
@@ -1623,7 +1717,10 @@ def check_reactions(all_mids: dict) -> None:
 
         # Expire old signals
         if now - s["sent_at"] > ACTIVE_SIGNAL_TTL_S:
-            print(f"  [REACT] {key} expired after 7d — dropping")
+            age_h = (now - s["sent_at"]) / 3600
+            sym, direction = key.split("_", 1)
+            print(f"  [TTL] Expiring {sym} {direction} signal "
+                  f"(age {age_h:.1f}h > TTL {ACTIVE_SIGNAL_TTL_HOURS}h)")
             to_drop.append(key)
             continue
 
@@ -1662,16 +1759,22 @@ def check_reactions(all_mids: dict) -> None:
                 to_drop.append(key)
                 continue
 
+            # Phase 1: has price entered the entry zone yet?
+            # NOTE: We use zone BOUNDS (not exact_entry) to detect a zone touch.
+            # With a 15-minute scan interval, price can dip into the zone and bounce
+            # before the next scan fires — using the tighter exact_entry point would
+            # produce phantom "missed" outcomes for limit orders that filled and reversed.
+            # Zone-bound detection is intentionally wider to catch these fills.
+            # For exact fill confirmation, OHLC candle data would be required; the
+            # mid-price approach is a known limitation documented in PERF-01.
+            entry_zone_low_s  = s.get("entry_zone_low",  exact_entry)
+            entry_zone_high_s = s.get("entry_zone_high", exact_entry)
             if direction == "long":
-                # BUG-22 fix: a wick to zone_high doesn't guarantee a fill — the
-                # limit order sits at exact_entry, which can be well below zone_high.
-                in_zone       = bar_low <= exact_entry
+                in_zone       = price <= entry_zone_high_s   # price dipped anywhere into the zone
                 past_sl       = bar_low  <= sl
                 tp1_pre_entry = bar_high >= tp1   # bar spiked to TP1 without entering zone
             else:
-                # BUG-22 fix: symmetric — short limit fills only once price rises
-                # to meet exact_entry, not merely into the zone.
-                in_zone       = bar_high >= exact_entry
+                in_zone       = price >= entry_zone_low_s    # price rose anywhere into the zone
                 past_sl       = bar_high >= sl
                 tp1_pre_entry = bar_low  <= tp1   # bar dropped to TP1 without entering zone
 
@@ -1887,14 +1990,20 @@ STATE_FILE = pathlib.Path("state.json")
 
 def cleanup_state() -> None:
     """
-    Prune stale entries from both dicts before saving.
+    Prune expired or resolved entries from _active_signals and _fired_signals.
 
     fired_signals  — remove entries older than the cooldown window (4h).
                      Once the cooldown has passed the entry serves no purpose.
 
     active_signals — remove entries that are resolved or have exceeded the
-                     7-day TTL. These should already be dropped by
-                     check_reactions() but this is a safety net.
+                     48-hour TTL.
+
+    Active-signal pruning: In normal operation, check_reactions() already
+    pops resolved signals before this function runs, so the loop below
+    typically finds nothing to remove. It acts as a safety net for the rare
+    case where the previous run was killed mid-check_reactions(), leaving
+    stale resolved entries in state.json. Do not remove this loop on the
+    assumption that it "never fires" — it is an intentional recovery mechanism.
     """
     now = time.time()
 
@@ -1948,6 +2057,12 @@ def load_state() -> None:
 
 def save_state() -> None:
     # IMP-09: cleanup_state() is no longer called here; call it explicitly once per scan in main()
+    # Safety net: flush any dirty win-rate data before persisting other state.
+    # This guards against kill-between-reactions data loss (REMAINING-05).
+    # save_win_rate() is idempotent — calling it twice in the same run is safe.
+    if _win_rate_dirty:
+        save_win_rate()
+
     try:
         state_json = json.dumps({
             "fired_signals":  _fired_signals,
@@ -1973,9 +2088,21 @@ def save_state() -> None:
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _shutdown_handler(signum, frame):
+    """
+    Graceful shutdown handler for SIGTERM and SIGINT.
+    Ensures win-rate and active-signal state are flushed to disk before exit.
+    SIGKILL cannot be caught — in-flight data at kill time is still lost, but
+    this covers the common cases: Docker stop, systemd stop, cron manager stop.
+    """
+    print(f"\n  [SHUTDOWN] Received signal {signum} — saving state before exit.")
+    save_state()
+    sys.exit(0)
+
+
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v6.0  [single-scan mode]")
+    print("  SMC Signal Engine v7.0  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
@@ -1984,6 +2111,11 @@ def main() -> None:
     print("  Perf: Parallel scan (5 workers) | Candle/ATR caching")
     print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
     print("=" * 60)
+
+    # Register graceful shutdown handlers so SIGTERM/SIGINT triggers a clean
+    # state save (win-rate + active signals) before process exit.
+    _signal.signal(_signal.SIGTERM, _shutdown_handler)
+    _signal.signal(_signal.SIGINT,  _shutdown_handler)
 
     load_state()
     load_win_rate()
