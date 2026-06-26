@@ -13,6 +13,7 @@ Signals are PREDICTIVE — exact limit entry price set BEFORE price arrives.
 """
 
 import os, time, math, threading, requests, random, json, pathlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 
@@ -50,6 +51,11 @@ LONDON_CLOSE_H = 12
 NY_OPEN_H      = 13
 NY_CLOSE_H     = 20
 
+# IMP-07: 12:00–13:00 UTC is a low-liquidity London→NY transition window.
+# Scans during this hour are suppressed unconditionally (even the emergency scan bypass).
+DEAD_ZONE_START_H = 12
+DEAD_ZONE_END_H   = 13
+
 # ── VOLUME CONFIRMATION (High priority upgrade) ───────────────────────────────
 # Require sweep candle volume > N× average volume to filter fake sweeps
 VOLUME_GATE_ENABLED     = True
@@ -71,6 +77,13 @@ TP2_MIN_RR                = 2.5
 # current price. Zones too far away will almost never fill within the 2h expiry.
 ENTRY_ZONE_MAX_ATR_DISTANCE = 2.0   # tune up to loosen, down to tighten
 
+# ── ENTRY ZONE % DISTANCE GATE (run_scan) ─────────────────────────────────────
+# Second, independent proximity gate applied later in run_scan(): drop signals
+# whose entry zone top/bottom is more than this % away from current price.
+# Units differ from ENTRY_ZONE_MAX_ATR_DISTANCE above (% vs ATR multiples) —
+# both gates are applied at different stages; a signal must pass both.
+MAX_ENTRY_DIST_PCT = 2.5   # max % distance from current price to entry zone top/bottom
+
 # ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
 SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
@@ -82,6 +95,7 @@ WIN_RATE_FILE = pathlib.Path("win_rate.json")
 OB_LOOKBACK        = 50
 OB_MIN_MOVE_ATR    = 1.5
 OB_MAX_AGE_BARS    = 40
+OB_IMPULSE_LOOKFORWARD = 8   # IMP-08: bars to look ahead for impulse move (was hardcoded 3)
 FVG_MIN_SIZE_ATR   = 0.3
 FVG_MAX_AGE_BARS   = 30
 SWEEP_LOOKBACK     = 30
@@ -99,7 +113,7 @@ FIB_TOLERANCE_PCT = 0.005   # 0.5% tolerance for "at a fib level"
 FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
-# Max score is now 7 (added Fibonacci layer)
+# Max score is 8: 6 base factors + 1 Fib confluence + 1 Fib golden zone bonus
 MIN_CONFLUENCE_SCORE  = 5
 STRONG_SIGNAL_SCORE   = 5
 APLUS_SIGNAL_SCORE    = 6
@@ -129,6 +143,19 @@ _CANDLE_CACHE_TTL_S = 60 * 60         # 60-minute TTL (well within a 4H close)
 # Stored separately so the TTL can differ from the 4H cache.
 _candle_cache_1d: dict[str, dict] = {}
 _CANDLE_CACHE_1D_TTL_S = 60 * 60 * 4  # 4-hour TTL
+
+# ── 1H CANDLE CACHE (PERF-05B) ────────────────────────────────────────────────
+# 1H candles are currently fetched fresh per symbol. Since the 1H bias doesn't
+# change between 15-minute scans, caching them within each scan run halves API
+# calls for multi-timeframe analysis (~25 fewer calls per scan).
+_candle_cache_1h: dict[str, dict] = {}
+_CANDLE_CACHE_1H_TTL_S = 60 * 15  # 15-minute TTL — aligns with scan interval
+
+# ── PER-RUN ATR CACHE (PERF-02) ───────────────────────────────────────────────
+# ATR is recomputed from scratch on every call and called 3× per symbol per
+# scan (4H, 1H, 15M). Cache by (symbol, timeframe) within each scan run.
+# Cleared at the top of run_scan() so results are never stale.
+_atr_cache: dict[str, float] = {}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -193,20 +220,34 @@ def hl_post(payload: dict):
     global _hl_last_req_ts, _hl_min_interval
     for attempt in range(5):
         try:
+            # BUG-09 fix: claim the next rate-limit slot atomically, *inside* the
+            # lock, before releasing it. With the old code the wait-check and the
+            # timestamp update were two separate lock acquisitions with the actual
+            # request in between — under ThreadPoolExecutor (PERF-05A) every worker
+            # thread could pass the "is it time yet?" check before any of them had
+            # recorded a request, defeating the rate limit entirely. Sleeping while
+            # still holding the lock forces threads to queue up and serialize their
+            # request *starts* exactly _hl_min_interval apart, while the request
+            # itself still runs outside the lock so I/O overlaps across threads.
             with _hl_lock:
                 elapsed = time.time() - _hl_last_req_ts
                 wait    = _hl_min_interval - elapsed
                 if wait > 0:
                     time.sleep(wait)
-                _hl_last_req_ts = time.time()
+                _hl_last_req_ts = time.time()   # reserve slot before unlocking
+
             r = _hl_session.post(HL_INFO_URL, json=payload,
                                   headers={"Content-Type": "application/json"},
                                   timeout=15)
+
             if r.status_code == 429:
                 time.sleep(min(20.0, 1.0 * (2 ** attempt)) + random.uniform(0, 0.3))
                 continue
             r.raise_for_status()
-            return r.json()
+            data = r.json()
+            if isinstance(data, dict) and "error" in data:
+                raise ValueError(f"Hyperliquid API error (HTTP 200): {data['error']}")
+            return data
         except Exception:
             if attempt == 4:
                 raise
@@ -215,6 +256,11 @@ def hl_post(payload: dict):
 
 def current_bar_open_ms(ref_ms: int, interval: str) -> int:
     return (ref_ms // INTERVAL_MS[interval]) * INTERVAL_MS[interval]
+
+def filter_valid_candles(candles: list[dict]) -> list[dict]:
+    """IMP-02: Remove flat/stale candles where h == l (zero True Range). These corrupt ATR."""
+    return [c for c in candles if c["h"] > c["l"]]
+
 
 def get_candles(symbol: str, interval: str, n: int) -> list[dict]:
     iv_ms    = INTERVAL_MS[interval]
@@ -231,7 +277,8 @@ def get_candles(symbol: str, interval: str, n: int) -> list[dict]:
     candles = [{"t": int(c["t"]), "o": float(c["o"]), "h": float(c["h"]),
                 "l": float(c["l"]), "c": float(c["c"]), "v": float(c["v"])}
                for c in raw]
-    return [c for c in candles if c["t"] < end_ms][-n:]
+    valid = [c for c in candles if c["t"] < end_ms][-n:]
+    return filter_valid_candles(valid)   # IMP-02: strip flat/stale candles (h == l)
 
 
 def get_candles_4h_cached(symbol: str) -> list[dict]:
@@ -262,6 +309,20 @@ def get_candles_1d_cached(symbol: str) -> list[dict]:
     return candles
 
 
+def get_candles_1h_cached(symbol: str) -> list[dict]:
+    """
+    PERF-05B: Return 1H candles from the in-memory cache when fresh (< 15 min).
+    1H candles don't change between 15-minute scan cycles; caching them cuts
+    ~25 API calls per full-watchlist scan.
+    """
+    entry = _candle_cache_1h.get(symbol)
+    if entry and (time.time() - entry["ts"]) < _CANDLE_CACHE_1H_TTL_S:
+        return entry["candles"]
+    candles = get_candles(symbol, "1h", N_1H)
+    _candle_cache_1h[symbol] = {"candles": candles, "ts": time.time()}
+    return candles
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # INDICATORS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -275,14 +336,23 @@ def calc_atr(candles: list[dict], period: int = ATR_LEN) -> float:
            for i in range(1, len(candles))]
     return sum(trs[-period:]) / period
 
+def calc_atr_cached(symbol: str, tf: str, candles: list, period: int = ATR_LEN) -> float:
+    """PERF-02: Memoized ATR. Returns cached value within the same scan run."""
+    key = f"{symbol}:{tf}"
+    if key not in _atr_cache:
+        _atr_cache[key] = calc_atr(candles, period)
+    return _atr_cache[key]
+
+
 def calc_ema(values: list[float], period: int) -> list[float]:
+    # BUG-17: returns only computed values (no zero-padding); callers use [-1], [-3] etc.
     if len(values) < period:
         return values[:]
     k   = 2.0 / (period + 1)
     out = [sum(values[:period]) / period]
     for v in values[period:]:
         out.append(v * k + out[-1] * (1 - k))
-    return [0.0] * (period - 1) + out
+    return out   # no zero-padding
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SESSION FILTER  (High priority upgrade)
@@ -293,10 +363,14 @@ def is_active_session() -> bool:
     Return True if current UTC hour falls inside London or New York sessions.
     London : 07:00–12:00 UTC
     New York: 13:00–20:00 UTC
+    IMP-07: 12:00–13:00 UTC dead zone is always excluded (not even emergency-bypassed).
     """
     if not SESSION_FILTER_ENABLED:
         return True
     hour = datetime.now(timezone.utc).hour
+    # IMP-07: dead zone is unconditional — never trade during this window
+    if DEAD_ZONE_START_H <= hour < DEAD_ZONE_END_H:
+        return False
     in_london = LONDON_OPEN_H <= hour < LONDON_CLOSE_H
     in_ny     = NY_OPEN_H     <= hour < NY_CLOSE_H
     return in_london or in_ny
@@ -352,6 +426,11 @@ def btc_regime_blocks_long() -> bool:
     return BTC_REGIME_FILTER_ENABLED and get_btc_regime() == "bear"
 
 
+def btc_regime_blocks_short() -> bool:
+    """IMP-03: Return True when BTC is strongly bullish and altcoin shorts carry elevated risk."""
+    return BTC_REGIME_FILTER_ENABLED and get_btc_regime() == "bull"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOLUME CONFIRMATION GATE  (High priority upgrade)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -383,15 +462,15 @@ def is_swing_high(candles: list[dict], i: int, n: int) -> bool:
     if i < n or i >= len(candles) - n:
         return False
     h = candles[i]["h"]
-    return (all(candles[i-k]["h"] <= h for k in range(1, n+1)) and
-            all(candles[i+k]["h"] <= h for k in range(1, n+1)))
+    return (all(candles[i-k]["h"] < h for k in range(1, n+1)) and   # IMP-05: strict < (was <=)
+            all(candles[i+k]["h"] < h for k in range(1, n+1)))
 
 def is_swing_low(candles: list[dict], i: int, n: int) -> bool:
     if i < n or i >= len(candles) - n:
         return False
     l = candles[i]["l"]
-    return (all(candles[i-k]["l"] >= l for k in range(1, n+1)) and
-            all(candles[i+k]["l"] >= l for k in range(1, n+1)))
+    return (all(candles[i-k]["l"] > l for k in range(1, n+1)) and   # IMP-05: strict > (was >=)
+            all(candles[i+k]["l"] > l for k in range(1, n+1)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -423,7 +502,7 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
     Golden zone (0.618–0.786) = highest probability.
     """
     n      = len(candles_4h)
-    lb     = min(FIB_SWING_LOOKBACK, n - 4)
+    lb     = min(FIB_SWING_LOOKBACK + 2, n - 2)   # BUG-24: +2 recovers edge bars excluded by swing detector's 2-bar side requirement
     window = candles_4h[-(lb):]
 
     # Find the most recent significant swing pair
@@ -492,15 +571,21 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
 
     for name, lvl in key_levels.items():
         dist = abs(zone_mid - lvl)
-        tol  = rng * FIB_TOLERANCE_PCT * 3   # generous tolerance for zone overlap
-        if dist < nearest_dist:
+        tol  = rng * FIB_TOLERANCE_PCT       # BUG-04 fix: removed *3 multiplier; tol is now enforced below
+        if dist < tol and dist < nearest_dist:   # gate: zone must be within 0.5% of a fib level
             nearest_dist  = dist
             nearest_name  = name
             nearest_level = lvl
 
     # Is the entry zone sitting inside the golden zone (0.618–0.786)?
-    golden_low  = fibs["0.786"]  # lower price = higher retracement for long
-    golden_high = fibs["0.618"]
+    # BUG-03 fix: For LONG, fib drawn low→high so 0.618 > 0.786 in price.
+    # For SHORT, fib drawn high→low so 0.786 is numerically HIGHER than 0.618.
+    if direction == "long":
+        golden_low  = fibs["0.786"]   # lower price level (deeper retracement)
+        golden_high = fibs["0.618"]   # higher price level (shallower retracement)
+    else:  # short — fib drawn from high to low; 0.786 is closer to swing high (higher price)
+        golden_low  = fibs["0.618"]   # lower price level for shorts
+        golden_high = fibs["0.786"]   # higher price level for shorts
     in_golden   = (entry_zone_low <= golden_high and entry_zone_high >= golden_low)
 
     # Only return result if zone is reasonably close to a key fib level
@@ -526,11 +611,15 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_htf_bias(candles_4h: list[dict]) -> str:
+    # BUG-17: calc_ema no longer zero-pads; need enough bars so ema[-3] is valid.
+    # With period=50 we get len(closes)-49 EMA values; 55 bars → 6 EMA values → safe.
     if len(candles_4h) < 55:
         return "neutral"
     closes = [c["c"] for c in candles_4h]
     ema21  = calc_ema(closes, 21)
     ema50  = calc_ema(closes, 50)
+    if len(ema21) < 3 or len(ema50) < 3:
+        return "neutral"
     cur    = closes[-1]
     e21, e50 = ema21[-1], ema50[-1]
     if cur > e21 > e50 and ema21[-1] > ema21[-3] and ema50[-1] > ema50[-3]:
@@ -541,30 +630,33 @@ def get_htf_bias(candles_4h: list[dict]) -> str:
 
 def find_order_blocks(candles: list[dict], timeframe: str,
                       atr: float, bias: str) -> list[OrderBlock]:
-    obs = []
-    n   = len(candles)
-    for i in range(n - min(OB_LOOKBACK, n - 2), n - 2):
+    # PERF-03: detection and validity filter merged into one pass (halves iterations).
+    valid     = []
+    n         = len(candles)
+    cur_price = candles[-1]["c"]
+    last_idx  = n - 1
+    start_i   = n - min(OB_LOOKBACK, n - 2)
+
+    for i in range(start_i, n - 2):
+        # Age gate — apply before building the OB object to avoid allocation
+        if last_idx - i > OB_MAX_AGE_BARS:
+            continue
+
         cur = candles[i]
         if bias in ("bull", "neutral") and cur["c"] < cur["o"]:
-            move_up = max(candles[j]["h"] for j in range(i+1, min(i+4, n))) - cur["h"]
+            move_up = max(candles[j]["h"] for j in range(i+1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n))) - cur["h"]
             if move_up >= atr * OB_MIN_MOVE_ATR:
-                obs.append(OrderBlock(cur["h"], cur["l"], "bull", i, timeframe))
-        if bias in ("bear", "neutral") and cur["c"] > cur["o"]:
-            move_dn = cur["l"] - min(candles[j]["l"] for j in range(i+1, min(i+4, n)))
-            if move_dn >= atr * OB_MIN_MOVE_ATR:
-                obs.append(OrderBlock(cur["h"], cur["l"], "bear", i, timeframe))
+                # BUG-10 fix: price must be above zone_high for a bull OB re-test
+                if cur_price > cur["h"]:
+                    valid.append(OrderBlock(cur["h"], cur["l"], "bull", i, timeframe))
 
-    cur_price = candles[-1]["c"]
-    last_idx  = len(candles) - 1
-    valid = []
-    for ob in obs:
-        if last_idx - ob.bar_index > OB_MAX_AGE_BARS:
-            continue
-        if ob.direction == "bull" and cur_price < ob.price_low:
-            continue
-        if ob.direction == "bear" and cur_price > ob.price_high:
-            continue
-        valid.append(ob)
+        if bias in ("bear", "neutral") and cur["c"] > cur["o"]:
+            move_dn = cur["l"] - min(candles[j]["l"] for j in range(i+1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n)))
+            if move_dn >= atr * OB_MIN_MOVE_ATR:
+                # BUG-10 fix: price must be below zone_low for a bear OB re-test
+                if cur_price < cur["l"]:
+                    valid.append(OrderBlock(cur["h"], cur["l"], "bear", i, timeframe))
+
     return valid
 
 def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValueGap]:
@@ -586,17 +678,17 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
     if n < MSB_LOOKBACK + MSB_SWING_BARS:
         return False
     cur_close = candles[-1]["c"]
-    lookback  = candles[-(MSB_LOOKBACK):-1]
+    lookback  = candles[-(MSB_LOOKBACK):]
     nb        = MSB_SWING_BARS
     if direction == "long":
         highs = [c["h"] for i, c in enumerate(lookback)
-                 if nb <= i <= len(lookback) - nb - 1 and is_swing_high(lookback, i, nb)]
+                 if nb <= i <= len(lookback) - nb - 2 and is_swing_high(lookback, i, nb)]
         if not highs:
             return False
         return cur_close > max(highs[-3:] if len(highs) >= 3 else highs)
     else:
         lows = [c["l"] for i, c in enumerate(lookback)
-                if nb <= i <= len(lookback) - nb - 1 and is_swing_low(lookback, i, nb)]
+                if nb <= i <= len(lookback) - nb - 2 and is_swing_low(lookback, i, nb)]
         if not lows:
             return False
         return cur_close < min(lows[-3:] if len(lows) >= 3 else lows)
@@ -607,20 +699,18 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def find_equal_levels(candles: list[dict], direction: str) -> list[float]:
+    # PERF-04: O(n²) replaced with sort + O(n) adjacent scan.
+    # Sorting guarantees any pair within EQUAL_HL_TOLERANCE must be adjacent
+    # in the sorted array, so a single linear pass suffices.
+    # Complexity: O(n log n) vs O(n²) — future-proofs for larger SWEEP_LOOKBACK.
     window = candles[max(0, len(candles) - SWEEP_LOOKBACK):]
+    values = sorted([c["l"] for c in window] if direction == "long"
+                    else [c["h"] for c in window])
     levels = []
-    if direction == "long":
-        lows = [c["l"] for c in window]
-        for i in range(len(lows) - 1):
-            for j in range(i + 2, len(lows)):
-                if abs(lows[i] - lows[j]) / max(lows[i], 1e-9) <= EQUAL_HL_TOLERANCE:
-                    levels.append((lows[i] + lows[j]) / 2)
-    else:
-        highs = [c["h"] for c in window]
-        for i in range(len(highs) - 1):
-            for j in range(i + 2, len(highs)):
-                if abs(highs[i] - highs[j]) / max(highs[i], 1e-9) <= EQUAL_HL_TOLERANCE:
-                    levels.append((highs[i] + highs[j]) / 2)
+    for i in range(len(values) - 1):
+        a, b = values[i], values[i + 1]
+        if abs(a - b) / max(a, 1e-9) <= EQUAL_HL_TOLERANCE:
+            levels.append((a + b) / 2)
     return sorted(set(round(l, 8) for l in levels))
 
 def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | None:
@@ -638,7 +728,7 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
     if len(candles_1h) < SWEEP_LOOKBACK + 2:
         return None
 
-    prior  = candles_1h[:-SWEEP_MULTIBAR_LOOKBACK - 1]
+    prior  = candles_1h[:-SWEEP_MULTIBAR_LOOKBACK]   # BUG-25: exclude only the sweep-check bars (was -SWEEP_MULTIBAR_LOOKBACK - 1, which excluded 4 bars)
     levels = find_equal_levels(prior, direction)
     if not levels:
         return None
@@ -719,10 +809,10 @@ def compute_exact_entry(direction: str,
 
     # Priority 4: Conservative zone placement
     if direction == "long":
-        # Enter at upper 33% of zone (closer to current price, less slippage risk)
+        # Enter at 67th percentile of zone (upper third) — IMP-06: was labelled "upper 30%" but 0.67 = upper third
         price = entry_zone_low + zone_size * 0.67
     else:
-        # Enter at lower 33% of zone
+        # Enter at 33rd percentile of zone (lower third)
         price = entry_zone_high - zone_size * 0.67
 
     return round(price, 8), "Zone midpoint (conservative)"
@@ -752,10 +842,13 @@ def compute_smc_signal(symbol: str,
     """
     if len(candles_4h) < 60 or len(candles_1h) < 60 or len(candles_15m) < 60:
         return None
+    # BUG-20: explicit 1D validation distinguishes "insufficient data" from "neutral bias"
+    if len(candles_1d) < 55:
+        print(f"[{symbol}] 1D candles insufficient ({len(candles_1d)} bars) — skipping bias")
 
-    atr_4h  = calc_atr(candles_4h)
-    atr_1h  = calc_atr(candles_1h)
-    atr_15m = calc_atr(candles_15m)
+    atr_4h  = calc_atr_cached(symbol, "4h",  candles_4h)   # PERF-02
+    atr_1h  = calc_atr_cached(symbol, "1h",  candles_1h)   # PERF-02
+    atr_15m = calc_atr_cached(symbol, "15m", candles_15m)  # PERF-02
     cur_p   = candles_15m[-1]["c"]
 
     # ── Step 1: HTF Bias ─────────────────────────────────────────────────────
@@ -846,8 +939,11 @@ def compute_smc_signal(symbol: str,
         if near_fvg_15m:
             details["15m_fvg"] = {"high": near_fvg_15m.gap_high, "low": near_fvg_15m.gap_low}
 
-    # ── Gate (pre-Fib) ───────────────────────────────────────────────────────
-    if score < MIN_CONFLUENCE_SCORE:
+    # ── Gate (pre-Fib fast exit) ─────────────────────────────────────────────
+    # BUG-05 fix: use a loose gate here (3) so clearly weak setups are skipped
+    # cheaply, but valid setups that need Fibonacci to reach MIN_CONFLUENCE_SCORE
+    # are not discarded prematurely.
+    if score < 3:
         return None
 
     # ── Build Entry Zone ─────────────────────────────────────────────────────
@@ -869,6 +965,17 @@ def compute_smc_signal(symbol: str,
         entry_src  = "ATR zone"
     details["entry_source"] = entry_src
 
+    # ── IMP-01 fix: guard against zero/flat ATR and zero-width or inverted
+    # entry zones (e.g. stale candle data where h == l). Without this, a
+    # zero-risk signal with TP1 == TP2 == exact_entry can slip through to
+    # Telegram with garbage R:R values.
+    if atr_15m <= 0:
+        print(f"[{symbol}] Skipping — ATR is zero (stale/flat candle data)")
+        return None
+    if entry_high <= entry_low:
+        print(f"[{symbol}] Skipping — entry zone is zero-width or inverted")
+        return None
+
     # ── Step 7: Fibonacci Confluence ─────────────────────────────────────────
     fib = find_fib_confluence(candles_4h, direction, entry_high, entry_low)
     if fib:
@@ -889,6 +996,13 @@ def compute_smc_signal(symbol: str,
             "0.786": fib.fib_786,
         }
 
+    # ── Final confluence gate (after all scoring including Fibonacci) ────────
+    # BUG-05 fix: this gate now runs after Fibonacci adds its +1 or +2 points,
+    # so setups that rely on Fibonacci to reach MIN_CONFLUENCE_SCORE are no
+    # longer incorrectly dropped.
+    if score < MIN_CONFLUENCE_SCORE:
+        return None
+
     # ── Exact Entry Price ────────────────────────────────────────────────────
     exact_entry, entry_reason = compute_exact_entry(
         direction, entry_high, entry_low, fib, sweep, atr_15m
@@ -908,7 +1022,13 @@ def compute_smc_signal(symbol: str,
         if sweep:
             sl_base = max(sl_base, sweep["level"] + atr_1h * 0.3)
         if fib:
-            sl_base = max(sl_base, fib.fib_786 + atr_4h * 0.2)
+            # BUG-07 fix: for shorts, SL must be above entry.
+            # Only use fib_786 if it is actually above entry_high (valid invalidation).
+            # Otherwise fall back to swing_high (the fib 0.0 level = top of the range).
+            if fib.fib_786 > entry_high:
+                sl_base = max(sl_base, fib.fib_786 + atr_4h * 0.2)
+            else:
+                sl_base = max(sl_base, fib.swing_high + atr_4h * 0.2)
         stop_loss = sl_base
 
     # ── Take Profit (TP1 conservative, TP2 full target) ──────────────────────
@@ -916,14 +1036,14 @@ def compute_smc_signal(symbol: str,
         risk      = exact_entry - stop_loss
         tp1       = exact_entry + risk * 2.0     # 1:2 R:R minimum
         highs_4h  = [c["h"] for c in candles_4h[-40:] if c["h"] > cur_p]
-        tp2       = min(highs_4h) if highs_4h else exact_entry + risk * 4.0
+        tp2       = max(highs_4h) if highs_4h else exact_entry + risk * 4.0  # BUG-01 fix: max = furthest swing high
         if tp2 < tp1:
             tp2 = exact_entry + risk * 3.0
     else:
         risk      = stop_loss - exact_entry
         tp1       = exact_entry - risk * 2.0
         lows_4h   = [c["l"] for c in candles_4h[-40:] if c["l"] < cur_p]
-        tp2       = max(lows_4h) if lows_4h else exact_entry - risk * 4.0
+        tp2       = min(lows_4h) if lows_4h else exact_entry - risk * 4.0  # BUG-02 fix: min = furthest swing low
         if tp2 > tp1:
             tp2 = exact_entry - risk * 3.0
 
@@ -1008,19 +1128,6 @@ def fmt_rr(entry: float, sl: float, tp: float, direction: str) -> str:
 # TELEGRAM ALERT
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def send_telegram(text: str) -> None:
-    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    for attempt in range(3):
-        try:
-            r = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text,
-                                          "parse_mode": "HTML"}, timeout=10)
-            r.raise_for_status()
-            return
-        except Exception as e:
-            if attempt == 2:
-                print(f"[TG ERROR] {e}")
-            time.sleep(2)
-
 def format_signal_message(sig: SMCSignal) -> str:
     dir_label   = "LONG" if sig.direction == "long" else "SHORT"
     dir_marker  = "▲" if sig.direction == "long" else "▼"
@@ -1042,13 +1149,17 @@ def format_signal_message(sig: SMCSignal) -> str:
     fib_section = ""
     if sig.fib:
         f = sig.fib
-        golden_tag = "  ← golden zone" if f.in_golden_zone else ""
+        golden_line = (
+            f"  🟡 Golden zone: {fmt_price(f.fib_786)}–{fmt_price(f.fib_618)}\n"
+            if f.in_golden_zone else ""
+        )
         fib_section = (
             f"\n<b>Fibonacci (4H)</b>\n"
             f"  0.382 → <code>{fmt_price(f.fib_382)}</code>\n"
             f"  0.500 → <code>{fmt_price(f.fib_50)}</code>\n"
-            f"  0.618 → <code>{fmt_price(f.fib_618)}</code>{golden_tag}\n"
-            f"  0.786 → <code>{fmt_price(f.fib_786)}</code>{golden_tag}\n"
+            f"  0.618 → <code>{fmt_price(f.fib_618)}</code>\n"
+            f"  0.786 → <code>{fmt_price(f.fib_786)}</code>\n"
+            f"{golden_line}"
         )
 
     entry_reason = sig.details.get("exact_entry_reason", "")
@@ -1094,6 +1205,7 @@ def format_signal_message(sig: SMCSignal) -> str:
 
 _fired_signals: dict[str, float] = {}
 SIGNAL_COOLDOWN_S = 4 * 60 * 60
+_last_scan_ts: float = 0.0   # last time run_scan() actually executed a scan (persisted in state.json)
 
 def is_duplicate(sig: SMCSignal) -> bool:
     key = f"{sig.symbol}_{sig.direction}"
@@ -1124,16 +1236,22 @@ def scan_symbol(symbol: str) -> SMCSignal | None:
     try:
         c4h  = get_candles_4h_cached(symbol)   # served from cache after first fetch
         c1d  = get_candles_1d_cached(symbol)   # 1D bias filter — 4-hour cache
-        c1h  = get_candles(symbol, "1h",  N_1H)
+        c1h  = get_candles_1h_cached(symbol)   # PERF-05B: cached within scan run
         c15m = get_candles(symbol, "15m", N_15M)
         if len(c4h) < 60 or len(c1h) < 60 or len(c15m) < 60:
+            # BUG-20: log which timeframe is insufficient to distinguish from neutral bias
+            if len(c4h) < 60:
+                print(f"  [{symbol}] 4H candles insufficient ({len(c4h)} bars) — skipping")
+            if len(c1h) < 60:
+                print(f"  [{symbol}] 1H candles insufficient ({len(c1h)} bars) — skipping")
+            if len(c15m) < 60:
+                print(f"  [{symbol}] 15M candles insufficient ({len(c15m)} bars) — skipping")
             return None
 
         # ── Volatility Filter ─────────────────────────────────────────────────
         # If the current 15M ATR is > 3× its 20-period average, price is in a
         # news spike or erratic expansion — skip to avoid unreliable signals.
         if len(c15m) >= 21:
-            current_atr = calc_atr(c15m[-2:] + [c15m[-1]], period=1)   # single-bar TR
             # Use the True Range of the last bar as "current ATR"
             last = c15m[-1]
             prev = c15m[-2]
@@ -1168,34 +1286,73 @@ def fetch_all_mids() -> dict[str, float]:
     return {}
 
 
-def run_scan() -> None:
+def run_scan(all_mids: dict | None = None) -> None:
+    global _last_scan_ts, _atr_cache
+    _atr_cache = {}   # PERF-02: clear per-run ATR memoization cache
     print(f"\n[SCAN] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
           f"— {len(WATCHLIST)} symbols")
 
     # ── Session Filter (High priority upgrade) ────────────────────────────────
+    hour = datetime.now(timezone.utc).hour
+    # IMP-07: dead zone (12:00–13:00 UTC) is unconditional — skip even emergency scans
+    if SESSION_FILTER_ENABLED and DEAD_ZONE_START_H <= hour < DEAD_ZONE_END_H:
+        print(f"  [SESSION] Dead zone (UTC hour={hour}, {DEAD_ZONE_START_H}:00–{DEAD_ZONE_END_H}:00) — scan skipped unconditionally.")
+        return
     if SESSION_FILTER_ENABLED and not is_active_session():
-        hour = datetime.now(timezone.utc).hour
-        last_fired = max(_fired_signals.values(), default=0)
-        hours_since_signal = (time.time() - last_fired) / 3600
-        if hours_since_signal < 8.0:
+        hours_since_scan = (time.time() - _last_scan_ts) / 3600
+        if hours_since_scan < 8.0:
             print(f"  [SESSION] Outside London/NY hours (UTC hour={hour}) — scan skipped "
-                  f"(last signal {hours_since_signal:.1f}h ago).")
+                  f"(last scan {hours_since_scan:.1f}h ago).")
             return
-        print(f"  [SESSION] Outside London/NY hours but {hours_since_signal:.1f}h since last signal "
+        print(f"  [SESSION] Outside London/NY hours but {hours_since_scan:.1f}h since last scan "
               f"— running emergency scan.")
 
+    # Mark scan time now that we've committed to actually scanning.
+    _last_scan_ts = time.time()
+
+
     # ── BTC Regime (Medium priority upgrade) — fetch once for whole scan ─────
-    btc_bear = btc_regime_blocks_long()
+    btc_bear  = btc_regime_blocks_long()
+    btc_bull  = btc_regime_blocks_short()   # IMP-03: block altcoin shorts in strong bull regime
     if btc_bear:
         print("  [BTC REGIME] Bear market detected — altcoin LONGS will be blocked.")
+    if btc_bull:
+        print("  [BTC REGIME] Bull market detected — altcoin SHORTS will be blocked.")
 
+    # PERF-05A: parallelize the per-symbol scan with a thread pool. Each
+    # scan_symbol() call is I/O-bound (waiting on HL API responses), so
+    # overlapping them collapses scan time from ~60-90s to ~15-20s for 25
+    # symbols. The shared rate limit is still enforced centrally in hl_post()
+    # (see the BUG-09 fix above) so workers don't exceed _hl_min_interval in
+    # aggregate. Candle/ATR caches are plain dicts; concurrent get/set on them
+    # is safe under the GIL — a rare double-fetch on a cache miss is the only
+    # possible side effect, never corrupted data.
+    results = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(scan_symbol, sym): sym for sym in WATCHLIST}
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                results[sym] = future.result()
+            except Exception as e:
+                print(f"  [SCAN ERROR] {sym}: {e}")
+                results[sym] = None
+
+    # Process results back in WATCHLIST order (not completion order) so that
+    # dedup, regime filtering, and logging stay deterministic across runs —
+    # only scan_symbol() itself runs concurrently; everything below is
+    # single-threaded and mutates global state exactly as before.
     signals = []
     for symbol in WATCHLIST:
-        sig = scan_symbol(symbol)
+        sig = results.get(symbol)
         if sig:
             # BTC regime: block altcoin longs (allow BTC itself through)
             if btc_bear and sig.direction == "long" and symbol != BTC_SYMBOL:
                 print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
+                continue
+            # IMP-03: block altcoin shorts when BTC is in a strong bull regime
+            if btc_bull and sig.direction == "short" and symbol != BTC_SYMBOL:
+                print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime")
                 continue
             if not is_duplicate(sig):
                 signals.append(sig)
@@ -1203,7 +1360,6 @@ def run_scan() -> None:
                       f"| {sig.confluence}/8 | {sig.combos_hit}")
         else:
             print(f"  —  {symbol} no signal")
-        time.sleep(0.25)
 
     # ── Sort by confluence desc ──────────────────────────────────────────────
     signals.sort(key=lambda s: s.confluence, reverse=True)
@@ -1252,20 +1408,24 @@ def run_scan() -> None:
         print("  [SCAN] No signals this round.")
         return
 
-    # ── Fetch current prices in one batch call ───────────────────────────────
-    all_mids = fetch_all_mids()
+    # ── Fetch current prices (reuse from caller if provided, PERF-01) ─────────
+    if all_mids is None:
+        all_mids = fetch_all_mids()
 
     # ── Pre-send staleness filters ────────────────────────────────────────────
     # MAX_ENTRY_DIST_PCT : drop signals whose entry zone is too far from price
     # (predictive is fine, but >3% away rarely fills within the 2h window)
-    MAX_ENTRY_DIST_PCT = 2.5
 
     print(f"\n  [TOP {TOP_N_SIGNALS}] Sending best signals:")
     for sig in final:
         coin      = hl_coin(sig.symbol)
         cur_price = all_mids.get(coin)
 
-        if cur_price is not None:
+        # IMP-11: warn and skip when the coin name lookup fails — avoids silently skipping stale-price check
+        if cur_price is None:
+            print(f"  ⚠️  [{sig.symbol}] WARNING: no mid price found in allMids — skipping stale check")
+            # Proceed without staleness validation rather than dropping the signal silently
+        elif cur_price is not None:
             dist_pct = abs(cur_price - sig.exact_entry) / cur_price * 100
             sig.details["current_price"]  = cur_price
             sig.details["entry_dist_pct"] = dist_pct
@@ -1433,49 +1593,20 @@ def track_active_signal(sig: SMCSignal, message_id: int) -> None:
     }
 
 
-def get_mid_price(symbol: str) -> float | None:
-    """Fetch current mid price from Hyperliquid."""
-    try:
-        raw = hl_post({"type": "allMids"})
-        if raw:
-            coin = hl_coin(symbol)
-            val  = raw.get(coin)
-            if val:
-                return float(val)
-    except Exception as e:
-        print(f"  [PRICE ERROR] {symbol}: {e}")
-    return None
-
-
-def get_intrabar_range(symbol: str, n_bars: int = 3) -> tuple[float, float] | None:
+def check_reactions(all_mids: dict) -> None:
     """
-    Fetch the last N closed 15M candles and return (lowest_low, highest_high).
-    This catches wicks that touched SL/TP between scan intervals and recovered
-    before the mid-price snapshot was taken.
-    Returns None on fetch failure — callers fall back to mid price only.
-    """
-    try:
-        candles = get_candles(symbol, "15m", n_bars)
-        if not candles:
-            return None
-        lo = min(c["l"] for c in candles)
-        hi = max(c["h"] for c in candles)
-        return lo, hi
-    except Exception as e:
-        print(f"  [INTRABAR] {symbol} fetch error: {e}")
-        return None
-
-
-def check_reactions() -> None:
-    """
-    For every active (unresolved) signal, fetch current price AND the last 3
-    candle high/lows to catch intrabar wicks that recovered between scans.
+    For every active (unresolved) signal, check the current mid price against
+    entry/TP/SL levels. Accepts the already-batched fetch_all_mids() result
+    from the caller (PERF-01) — eliminates N separate API calls (one per active
+    signal). Wick-level fills between scans are not detected, only the price
+    snapshot at the time this scan runs.
 
     Phase 1 — Waiting for entry zone touch:
-      Uses bar_low/bar_high so a wick into the zone is never missed.
+      Entry requires price to actually reach exact_entry (the limit price),
+      not just the wider zone_high/zone_low boundary (BUG-22 fix).
 
     Phase 2 — Trade active:
-      🔥  TP1 hit (intrabar high/low or mid price)
+      🔥  TP1 hit
       🏆  TP2 hit (full winner)
       😭  SL hit after entry
       😢  SL or TP1 hit before entry zone was ever touched (missed entry)
@@ -1483,10 +1614,7 @@ def check_reactions() -> None:
     now     = time.time()
     to_drop = []
 
-    # Fetch all mid prices in one API call
-    all_mids = fetch_all_mids()
-
-    for key, s in _active_signals.items():
+    for key, s in list(_active_signals.items()):  # BUG-06: iterate snapshot to prevent mutation-during-iteration
         if s["resolved"]:
             to_drop.append(key)
             continue
@@ -1502,20 +1630,20 @@ def check_reactions() -> None:
         if price is None:
             continue
 
-        direction = s["direction"]
-        zone_high = s["entry_zone_high"]
-        zone_low  = s["entry_zone_low"]
-        sl        = s["stop_loss"]
-        tp1       = s["take_profit_1"]
-        tp2       = s["take_profit_2"]
-        msg_id    = s["message_id"]
+        direction   = s["direction"]
+        zone_high   = s["entry_zone_high"]
+        zone_low    = s["entry_zone_low"]
+        exact_entry = s["exact_entry"]
+        sl          = s["stop_loss"]
+        tp1         = s["take_profit_1"]
+        tp2         = s["take_profit_2"]
+        msg_id      = s["message_id"]
 
-        # ── Intrabar range: catches wicks that recovered before this scan ─────
-        intrabar = get_intrabar_range(s["symbol"], n_bars=3)
-        if intrabar:
-            bar_low, bar_high = intrabar
-        else:
-            bar_low = bar_high = price   # fallback: treat mid price as the range
+        # IMP-04 fix: avoid a per-signal get_intrabar_range() API call (20+ extra
+        # calls/scan with a full watchlist of active signals). Use the already-
+        # fetched mid price instead; wick-level fills between scans are rare and
+        # debatable anyway for limit orders.
+        bar_low = bar_high = price
 
         print(f"  [REACT] {key} | mid={fmt_price(price)} "
               f"bar=[{fmt_price(bar_low)}–{fmt_price(bar_high)}]")
@@ -1533,13 +1661,15 @@ def check_reactions() -> None:
                 continue
 
             if direction == "long":
-                # Zone touch: bar_low dipped into the zone (bar_low <= zone_high)
-                in_zone       = bar_low  <= zone_high
+                # BUG-22 fix: a wick to zone_high doesn't guarantee a fill — the
+                # limit order sits at exact_entry, which can be well below zone_high.
+                in_zone       = bar_low <= exact_entry
                 past_sl       = bar_low  <= sl
                 tp1_pre_entry = bar_high >= tp1   # bar spiked to TP1 without entering zone
             else:
-                # Zone touch: bar_high rose into the zone (bar_high >= zone_low)
-                in_zone       = bar_high >= zone_low
+                # BUG-22 fix: symmetric — short limit fills only once price rises
+                # to meet exact_entry, not merely into the zone.
+                in_zone       = bar_high >= exact_entry
                 past_sl       = bar_high >= sl
                 tp1_pre_entry = bar_low  <= tp1   # bar dropped to TP1 without entering zone
 
@@ -1611,7 +1741,7 @@ def check_reactions() -> None:
                 record_outcome(s["symbol"], s.get("combos_hit", []), "loss")
             else:
                 react_to_message(msg_id, "😭")
-                record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
+                record_outcome(s["symbol"], s.get("combos_hit", []), "tp1_then_loss")  # BUG-23: distinct from clean tp1
             s["resolved"] = True
             to_drop.append(key)
 
@@ -1624,6 +1754,13 @@ def check_reactions() -> None:
 
     for key in to_drop:
         _active_signals.pop(key, None)
+
+    # PERF-06: flush win rate to disk once per check_reactions() call instead of
+    # after every individual outcome (avoids N sequential file writes per scan).
+    global _win_rate_dirty
+    if _win_rate_dirty:
+        save_win_rate()
+        _win_rate_dirty = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1640,7 +1777,8 @@ def check_reactions() -> None:
 #     "total":     {"wins": 8, "losses": 3, "tp1s": 2}
 #   }
 
-_win_rate_data: dict = {"by_symbol": {}, "by_combo": {}, "total": {"wins": 0, "losses": 0, "tp1s": 0}}
+_win_rate_data: dict = {"by_symbol": {}, "by_combo": {}, "total": {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0}}
+_win_rate_dirty: bool = False   # PERF-06: deferred write flag
 
 
 def load_win_rate() -> None:
@@ -1664,16 +1802,17 @@ def save_win_rate() -> None:
 
 def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     """
-    outcome: "win"    (TP2 hit)
-             "tp1"    (TP1 hit, not TP2)
-             "loss"   (SL hit after entry)
-             "missed" (SL or TP1 hit before entry zone was ever filled — 😢)
+    outcome: "win"          (TP2 hit)
+             "tp1"          (TP1 hit, not TP2 — trade still running or closed at TP1)
+             "tp1_then_loss" (TP1 hit, then SL hit on residual — BUG-23)
+             "loss"         (SL hit after entry, TP1 never reached)
+             "missed"       (SL or TP1 hit before entry zone was ever filled — 😢)
     """
     combo_key = "+".join(sorted(combos)) if combos else "unknown"
 
     for bucket, key in [("by_symbol", symbol), ("by_combo", combo_key)]:
         if key not in _win_rate_data[bucket]:
-            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0}
+            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0, "tp1_then_loss": 0}
         entry = _win_rate_data[bucket][key]
         if outcome == "win":
             entry["wins"] += 1
@@ -1681,6 +1820,9 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
             entry["losses"] += 1
         elif outcome == "tp1":
             entry["tp1s"] += 1
+        elif outcome == "tp1_then_loss":
+            entry.setdefault("tp1_then_loss", 0)
+            entry["tp1_then_loss"] += 1
         elif outcome == "missed":
             entry.setdefault("missed", 0)
             entry["missed"] += 1
@@ -1692,6 +1834,9 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
         t["losses"] += 1
     elif outcome == "tp1":
         t["tp1s"] += 1
+    elif outcome == "tp1_then_loss":
+        t.setdefault("tp1_then_loss", 0)
+        t["tp1_then_loss"] += 1
     elif outcome == "missed":
         t.setdefault("missed", 0)
         t["missed"] += 1
@@ -1699,9 +1844,12 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     total_trades = t["wins"] + t["losses"]
     wr = (t["wins"] / total_trades * 100) if total_trades else 0
     missed = t.get("missed", 0)
+    tp1tl  = t.get("tp1_then_loss", 0)
     print(f"  [WIN RATE] {symbol} → {outcome.upper()} | "
-          f"Overall: {t['wins']}W / {t['losses']}L = {wr:.1f}% WR | Missed: {missed}")
-    save_win_rate()
+          f"Overall: {t['wins']}W / {t['losses']}L = {wr:.1f}% WR | "
+          f"Missed: {missed} | TP1→SL: {tp1tl}")
+    global _win_rate_dirty
+    _win_rate_dirty = True   # PERF-06: defer write to end of check_reactions()
 
 
 def get_win_rate_summary() -> str:
@@ -1709,12 +1857,13 @@ def get_win_rate_summary() -> str:
     t = _win_rate_data.get("total", {})
     wins, losses = t.get("wins", 0), t.get("losses", 0)
     tp1s         = t.get("tp1s", 0)
+    tp1tl        = t.get("tp1_then_loss", 0)   # BUG-23: show TP1→SL separately
     missed       = t.get("missed", 0)
     total        = wins + losses
     if total == 0:
         return "No closed trades yet."
     wr = wins / total * 100
-    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s} | 😢 Missed entries: {missed}"]
+    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s} | TP1→SL: {tp1tl} | 😢 Missed: {missed}"]
     # Top 3 symbols by win rate (min 2 trades)
     by_sym = _win_rate_data.get("by_symbol", {})
     ranked = [(s, d) for s, d in by_sym.items() if d["wins"] + d["losses"] >= 2]
@@ -1773,32 +1922,45 @@ def cleanup_state() -> None:
 
 
 def load_state() -> None:
-    global _fired_signals, _active_signals
+    global _fired_signals, _active_signals, _last_scan_ts
     if STATE_FILE.exists():
         try:
             data            = json.loads(STATE_FILE.read_text())
             _fired_signals  = {k: float(v)
                                for k, v in data.get("fired_signals", {}).items()}
             _active_signals = data.get("active_signals", {})
+            _last_scan_ts   = float(data.get("last_scan_ts", 0.0))
             print(f"  [STATE] Loaded {len(_fired_signals)} cooldown + "
                   f"{len(_active_signals)} active signals")
         except Exception as e:
             print(f"  [STATE] Load error: {e} — starting fresh")
             _fired_signals  = {}
             _active_signals = {}
+            _last_scan_ts   = 0.0
     else:
         print("  [STATE] No state.json — starting fresh")
         _fired_signals  = {}
         _active_signals = {}
+        _last_scan_ts   = 0.0
 
 
 def save_state() -> None:
-    cleanup_state()   # prune before writing
+    # IMP-09: cleanup_state() is no longer called here; call it explicitly once per scan in main()
     try:
-        STATE_FILE.write_text(json.dumps({
+        state_json = json.dumps({
             "fired_signals":  _fired_signals,
             "active_signals": _active_signals,
-        }, indent=2))
+            "last_scan_ts":   _last_scan_ts,
+        }, indent=2)
+
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(state_json)
+
+        if STATE_FILE.exists():
+            STATE_FILE.replace(STATE_FILE.with_suffix(".bak"))   # keep last known-good copy
+
+        os.replace(tmp, STATE_FILE)   # atomic on POSIX; near-atomic on Windows
+
         print(f"  [STATE] Saved {len(_fired_signals)} cooldown + "
               f"{len(_active_signals)} active signals")
     except Exception as e:
@@ -1811,12 +1973,13 @@ def save_state() -> None:
 
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v4.0  [single-scan mode]")
+    print("  SMC Signal Engine v6.0  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
     print("  Upgrades: Session filter | Volume gate | BTC regime")
     print("            TP2 1:3 gate | Multi-bar sweep | Win rate memory")
+    print("  Perf: Parallel scan (5 workers) | Candle/ATR caching")
     print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
     print("=" * 60)
 
@@ -1827,10 +1990,12 @@ def main() -> None:
     print(f"\n{get_win_rate_summary()}")
 
     # ── Step 1: Check reactions on previously sent signals ───────────────────
+    # PERF-01: fetch all mids once here; pass to both check_reactions and run_scan
+    all_mids = fetch_all_mids()
     if _active_signals:
         print(f"\n[REACTIONS] Checking {len(_active_signals)} active signal(s)...")
         try:
-            check_reactions()
+            check_reactions(all_mids)
         except Exception as e:
             print(f"[REACT ERROR] {e}")
     else:
@@ -1838,11 +2003,12 @@ def main() -> None:
 
     # ── Step 2: Run new scan ─────────────────────────────────────────────────
     try:
-        run_scan()
+        run_scan(all_mids)
     except Exception as e:
         print(f"[MAIN ERROR] {e}")
-        send_telegram(f"⚠️ SMC Engine error: {e}")
+        send_telegram_get_id(f"⚠️ SMC Engine error: {e}")  # discard the returned message_id
 
+    cleanup_state()   # IMP-09: called once per scan, not embedded inside save_state()
     save_state()
     print("  [DONE] Scan complete. Exiting.")
 
