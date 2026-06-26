@@ -578,14 +578,16 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
             nearest_level = lvl
 
     # Is the entry zone sitting inside the golden zone (0.618–0.786)?
-    # BUG-03 fix: For LONG, fib drawn low→high so 0.618 > 0.786 in price.
-    # For SHORT, fib drawn high→low so 0.786 is numerically HIGHER than 0.618.
-    if direction == "long":
-        golden_low  = fibs["0.786"]   # lower price level (deeper retracement)
-        golden_high = fibs["0.618"]   # higher price level (shallower retracement)
-    else:  # short — fib drawn from high to low; 0.786 is closer to swing high (higher price)
-        golden_low  = fibs["0.618"]   # lower price level for shorts
-        golden_high = fibs["0.786"]   # higher price level for shorts
+    # BUG-03 fix (corrected): calc_fib_levels() always computes levels as
+    # swing_high - rng*ratio, regardless of direction — it is called the
+    # same way for both long and short. Since 0.786 > 0.618, fib_786 is
+    # ALWAYS numerically lower than fib_618, for both directions. The
+    # previous version of this fix incorrectly assumed the short fib
+    # formula was inverted, which made golden_low > golden_high for shorts
+    # and silently broke in_golden_zone for nearly all SHORT setups —
+    # reproducing the original BUG-03 symptom on the opposite branch.
+    golden_low  = fibs["0.786"]   # numerically lower, both directions
+    golden_high = fibs["0.618"]   # numerically higher, both directions
     in_golden   = (entry_zone_low <= golden_high and entry_zone_high >= golden_low)
 
     # Only return result if zone is reasonably close to a key fib level
