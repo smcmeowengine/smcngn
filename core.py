@@ -114,7 +114,7 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is 8: 6 base factors + 1 Fib confluence + 1 Fib golden zone bonus
-MIN_CONFLUENCE_SCORE  = 5
+MIN_CONFLUENCE_SCORE  = 6
 STRONG_SIGNAL_SCORE   = 5
 APLUS_SIGNAL_SCORE    = 6
 
