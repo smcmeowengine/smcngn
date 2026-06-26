@@ -1,7 +1,5 @@
 {
   "fired_signals": {
-    "PENDLEUSDT_short": 1782471662.6737607,
-    "BNBUSDT_short": 1782471663.8459873,
     "DOTUSDT_short": 1782472564.715287,
     "BTCUSDT_short": 1782478865.497472,
     "ETHUSDT_short": 1782478866.5126245,
@@ -99,7 +97,7 @@
         "15M_OB_FVG"
       ],
       "message_id": 926,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782483340.6526968
@@ -149,5 +147,5 @@
       "sent_at": 1782486051.172236
     }
   },
-  "last_scan_ts": 1782486030.1371372
+  "last_scan_ts": 1782486919.6291115
 }
