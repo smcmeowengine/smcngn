@@ -80,28 +80,6 @@
       "resolved": false,
       "sent_at": 1782483339.610695
     },
-    "UNIUSDT_short": {
-      "symbol": "UNIUSDT",
-      "direction": "short",
-      "exact_entry": 2.904905,
-      "entry_zone_high": 2.9106,
-      "entry_zone_low": 2.9021,
-      "stop_loss": 2.9363928571428572,
-      "take_profit_1": 2.841929285714285,
-      "take_profit_2": 2.7252,
-      "combos_hit": [
-        "HTF_BIAS",
-        "4H_OB",
-        "FVG",
-        "LIQ_SWEEP",
-        "15M_OB_FVG"
-      ],
-      "message_id": 926,
-      "entered": true,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782483340.6526968
-    },
     "LTCUSDT_short": {
       "symbol": "LTCUSDT",
       "direction": "short",
@@ -141,7 +119,7 @@
         "15M_OB_FVG"
       ],
       "message_id": 929,
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782486051.172236
@@ -169,5 +147,5 @@
       "sent_at": 1782487843.7056677
     }
   },
-  "last_scan_ts": 1782487822.5693793
+  "last_scan_ts": 1782488719.3556097
 }
