@@ -20,7 +20,7 @@
       ],
       "message_id": 895,
       "entered": true,
-      "tp1_hit": false,
+      "tp1_hit": true,
       "resolved": false,
       "sent_at": 1782416754.8398042
     }
