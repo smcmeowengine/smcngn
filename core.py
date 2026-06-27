@@ -82,6 +82,21 @@ TP2_MIN_RR                = 2.5
 # current price. Zones too far away will almost never fill within the 2h expiry.
 ENTRY_ZONE_MAX_ATR_DISTANCE = 1.2   # tune up to loosen, down to tighten
 
+# ── OI / FUNDING FILTER (NEW — v9) ───────────────────────────────────────────
+# Fetch Hyperliquid perpetual metadata once per scan run and cache per symbol.
+OI_FUNDING_ENABLED = True
+
+# Hard-block thresholds: crowd too crowded in the signal's direction → skip.
+# Funding is expressed as the per-8h rate returned by Hyperliquid (e.g. 0.0005 = 0.05%).
+FUNDING_BLOCK_THRESHOLD = 0.0005    # 0.05%/8h — extreme crowding, block the signal
+
+# Scoring bonus thresholds: mild directional bias in your favour → +1 point.
+FUNDING_ALIGN_THRESHOLD = 0.0001    # 0.01%/8h — noticeable but not extreme
+
+# OI confirmation: OI must drop by at least this fraction between two consecutive
+# scan snapshots to count as "open interest confirming an exit" on a sweep.
+OI_CONFIRM_DROP_PCT = 0.03          # 3% OI decline since last snapshot
+
 # ── ENTRY ZONE % DISTANCE GATE (run_scan) ─────────────────────────────────────
 # Second, independent proximity gate applied later in run_scan(): drop signals
 # whose entry zone top/bottom is more than this % away from current price.
@@ -120,8 +135,8 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is 8: 6 base factors + 1 Fib confluence + 1 Fib golden zone bonus
 MIN_CONFLUENCE_SCORE  = 5   # was 6; HTF_BIAS no longer contributes a point
-STRONG_SIGNAL_SCORE   = 4
-APLUS_SIGNAL_SCORE    = 5
+STRONG_SIGNAL_SCORE   = 5   # A grade = minimum passing (score exactly 5)
+APLUS_SIGNAL_SCORE    = 6   # A+ grade = strong confirmation (score 6 or 7)
 
 # ── INTERVAL MAP ─────────────────────────────────────────────────────────────
 INTERVAL_MS = {
@@ -156,6 +171,18 @@ _CANDLE_CACHE_1D_TTL_S = 60 * 60 * 4  # 4-hour TTL
 # calls for multi-timeframe analysis (~25 fewer calls per scan).
 _candle_cache_1h: dict[str, dict] = {}
 _CANDLE_CACHE_1H_TTL_S = 60 * 15  # 15-minute TTL — aligns with scan interval
+
+# ── OI / FUNDING CACHE (v9) ───────────────────────────────────────────────────
+# Populated once per scan run by fetch_all_oi_funding() in run_scan().
+# Key: coin string (e.g. "BTC"), not full symbol ("BTCUSDT").
+# Each entry: {"funding_rate": float, "open_interest": float, "prev_oi": float|None, "ts": float}
+# prev_oi is the open_interest value from the previous scan snapshot; used for
+# OI delta calculation. It is written by _update_oi_prev_snapshots() at the
+# start of each run, before the new snapshot overwrites it.
+# NOTE: prev_oi is NOT cleared between runs — it persists as the OI value
+# from the prior fetch_all_oi_funding() call, enabling per-scan OI delta.
+# It is reset to None only on process restart (when _oi_funding_data is empty).
+_oi_funding_data: dict[str, dict] = {}
 
 # ── PER-RUN ATR CACHE (PERF-02) ───────────────────────────────────────────────
 # ATR is recomputed from scratch on every call and called 3× per symbol per
@@ -212,6 +239,8 @@ class SMCSignal:
     combos_hit:      list = field(default_factory=list)
     fib:             FibResult | None = None
     details:         dict = field(default_factory=dict)
+    funding_rate:    float | None = None   # per-8h funding at signal time (v9)
+    oi_usd:          float | None = None   # open interest in USD at signal time (v9)
     timestamp:       str = ""
 
 
@@ -328,6 +357,69 @@ def get_candles_1h_cached(symbol: str) -> list[dict]:
     candles = get_candles(symbol, "1h", N_1H)
     _candle_cache_1h[symbol] = {"candles": candles, "ts": time.time()}
     return candles
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OI / FUNDING  (v9)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def fetch_all_oi_funding() -> None:
+    """
+    Populate _oi_funding_data with the latest funding rate and open interest
+    for every asset on Hyperliquid, in a single API call.
+
+    Called once at the top of run_scan() before the per-symbol scan loop.
+    The global _oi_funding_data dict is keyed by coin name (e.g. "BTC"),
+    matching the output of hl_coin(symbol).
+
+    Structure written per coin:
+        {
+            "funding_rate":  float,   # per-8h rate, e.g. 0.0005 = +0.05%
+            "open_interest": float,   # USD-denominated OI
+            "prev_oi":       float | None,  # OI from previous snapshot (for delta)
+            "ts":            float,   # Unix timestamp of this fetch
+        }
+
+    prev_oi is carried over from the existing entry (if any) so that
+    compute_smc_signal() can calculate the OI change since the last scan.
+    """
+    if not OI_FUNDING_ENABLED:
+        return
+    try:
+        raw = hl_post({"type": "metaAndAssetCtxs"})
+        if not raw or len(raw) < 2:
+            print("  [OI/FUNDING] metaAndAssetCtxs returned empty — skipping")
+            return
+        universe = raw[0].get("universe", [])
+        ctx_list  = raw[1]
+        now = time.time()
+        for i, asset in enumerate(universe):
+            coin = asset.get("name", "")
+            if not coin or i >= len(ctx_list):
+                continue
+            ctx = ctx_list[i]
+            new_oi  = float(ctx.get("openInterest", 0))
+            prev    = _oi_funding_data.get(coin)
+            prev_oi = prev["open_interest"] if prev else None
+            _oi_funding_data[coin] = {
+                "funding_rate":  float(ctx.get("funding", 0)),
+                "open_interest": new_oi,
+                "prev_oi":       prev_oi,
+                "ts":            now,
+            }
+        print(f"  [OI/FUNDING] Fetched {len(_oi_funding_data)} assets")
+    except Exception as e:
+        print(f"  [OI/FUNDING] fetch_all_oi_funding error: {e}")
+
+
+def get_oi_funding(symbol: str) -> dict | None:
+    """
+    Return the cached OI/funding entry for `symbol`, or None if unavailable.
+    Never makes an API call — relies on fetch_all_oi_funding() having run first.
+    """
+    if not OI_FUNDING_ENABLED:
+        return None
+    return _oi_funding_data.get(hl_coin(symbol))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -696,6 +788,16 @@ def find_order_blocks(candles: list[dict], timeframe: str,
                 if cur_price > cur["h"]:
                     # FIX 4: bull OB uses lower half only (strongest demand)
                     zone_mid = (cur["h"] + cur["l"]) / 2
+
+                    # IMP-NEW: Mitigation check — if any subsequent candle closed below zone_mid,
+                    # the demand at this OB was absorbed. Exclude mitigated OBs.
+                    mitigated = any(
+                        candles[j]["c"] < zone_mid
+                        for j in range(i + 1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n))
+                    )
+                    if mitigated:
+                        continue   # OB demand was consumed — skip
+
                     valid.append(OrderBlock(zone_mid, cur["l"], "bull", i, timeframe))
 
         if bias in ("bear", "neutral") and cur["c"] > cur["o"]:
@@ -705,6 +807,16 @@ def find_order_blocks(candles: list[dict], timeframe: str,
                 if cur_price < cur["l"]:
                     # FIX 4: bear OB uses upper half only (strongest supply)
                     zone_mid = (cur["h"] + cur["l"]) / 2
+
+                    # IMP-NEW: Mitigation check — if any subsequent candle closed above zone_mid,
+                    # the supply at this OB was absorbed. Exclude mitigated OBs.
+                    mitigated = any(
+                        candles[j]["c"] > zone_mid
+                        for j in range(i + 1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n))
+                    )
+                    if mitigated:
+                        continue   # OB supply was consumed — skip
+
                     valid.append(OrderBlock(cur["h"], zone_mid, "bear", i, timeframe))
 
     return valid
@@ -716,32 +828,47 @@ def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValue
     for i in range(max(0, n - FVG_MAX_AGE_BARS - 2), n - 2):
         c1, c3 = candles[i], candles[i+2]
         if c3["l"] > c1["h"] and (c3["l"] - c1["h"]) >= atr * FVG_MIN_SIZE_ATR:
-            if cur_p > c1["h"]:
+            # Price must be approaching the gap from above (above gap bottom, at or below gap top).
+            # If cur_p > c3["l"], price has already traded through the entire gap — zone is consumed.
+            if c1["h"] < cur_p <= c3["l"]:
                 fvgs.append(FairValueGap(c3["l"], c1["h"], "bull", i+1, timeframe))
         if c3["h"] < c1["l"] and (c1["l"] - c3["h"]) >= atr * FVG_MIN_SIZE_ATR:
-            if cur_p < c1["l"]:
+            # Price must be approaching the gap from below (below gap top, at or above gap bottom).
+            # If cur_p < c3["h"], price has already traded through the entire gap — zone is consumed.
+            if c3["h"] <= cur_p < c1["l"]:
                 fvgs.append(FairValueGap(c1["l"], c3["h"], "bear", i+1, timeframe))
     return fvgs
 
 def detect_msb(candles: list[dict], direction: str) -> bool:
+    """
+    Require TWO consecutive closed candles breaking the swing structure.
+    Single-bar breaks (news wicks, spoofs) are filtered out.
+    Uses the last two closed candles ([-1] and [-2]) — both are confirmed closed bars.
+    """
     n = len(candles)
-    if n < MSB_LOOKBACK + MSB_SWING_BARS:
+    if n < MSB_LOOKBACK + MSB_SWING_BARS + 1:   # +1 for the extra confirmation bar
         return False
-    cur_close = candles[-1]["c"]
-    lookback  = candles[-(MSB_LOOKBACK):]
-    nb        = MSB_SWING_BARS
+
+    cur_close  = candles[-1]["c"]
+    prev_close = candles[-2]["c"]   # second-to-last closed bar
+    lookback   = candles[-(MSB_LOOKBACK):]
+    nb         = MSB_SWING_BARS
+
     if direction == "long":
         highs = [c["h"] for i, c in enumerate(lookback)
                  if nb <= i <= len(lookback) - nb - 2 and is_swing_high(lookback, i, nb)]
         if not highs:
             return False
-        return cur_close > max(highs[-3:] if len(highs) >= 3 else highs)
+        threshold = max(highs[-3:] if len(highs) >= 3 else highs)
+        return cur_close > threshold and prev_close > threshold   # both bars above structure
+
     else:
         lows = [c["l"] for i, c in enumerate(lookback)
                 if nb <= i <= len(lookback) - nb - 2 and is_swing_low(lookback, i, nb)]
         if not lows:
             return False
-        return cur_close < min(lows[-3:] if len(lows) >= 3 else lows)
+        threshold = min(lows[-3:] if len(lows) >= 3 else lows)
+        return cur_close < threshold and prev_close < threshold   # both bars below structure
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -905,19 +1032,22 @@ def compute_smc_signal(symbol: str,
                         candles_15m: list[dict],
                         candles_1h:  list[dict],
                         candles_4h:  list[dict],
-                        candles_1d:  list[dict]) -> SMCSignal | None:
+                        candles_1d:  list[dict],
+                        oi_data:     dict | None = None) -> SMCSignal | None:
     """
     Full Combo 1 + Combo 2 + Fibonacci confluence engine.
 
-    Scoring (max 7):
-      +1  HTF 4H bias confirmed
+    Scoring (max 9):
+      +0  HTF 4H bias (required direction gate — not scored)
       +1  4H Order Block (approaching zone)
       +1  4H or 1H Fair Value Gap
       +1  1H Liquidity Sweep
       +1  15M Market Structure Break
       +1  15M OB / FVG (precision entry layer)
       +1  Fibonacci confluence (0.382 / 0.5 / 0.618 / 0.786)
-              → +2 if in golden zone (0.618–0.786)  [upgrades score]
+              → +2 if in golden zone (0.618–0.786)  [upgrades score by 2, not 1]
+      +1  Funding alignment (shorts/longs overpaying against signal direction)
+      +1  OI confirmation (OI declining during liquidity sweep — exits confirmed)
     """
     if len(candles_4h) < 60 or len(candles_1h) < 60 or len(candles_15m) < 60:
         return None
@@ -943,9 +1073,31 @@ def compute_smc_signal(symbol: str,
     if bias_1d != "neutral" and bias_1d != bias:
         return None   # 4H and 1D disagree — skip
 
+    # ── Step 1c: 1H Bias Alignment Filter ───────────────────────────────
+    # If 1H trend is confirmed opposite to 4H direction, skip.
+    # "neutral" 1H bias is acceptable — only a confirmed opposing trend blocks.
+    bias_1h = get_htf_bias(candles_1h)
+    if bias_1h != "neutral" and bias_1h != bias:
+        return None   # 1H opposes 4H — counter-trend setup, skip
+
+    # ── Step 1d: Funding Hard Block (v9) ────────────────────────────────────
+    # If the crowd is already overwhelmingly positioned in the signal direction,
+    # the smart money squeeze has likely already occurred — skip the setup.
+    if oi_data and OI_FUNDING_ENABLED:
+        fr = oi_data.get("funding_rate", 0.0)
+        if direction == "long" and fr > FUNDING_BLOCK_THRESHOLD:
+            print(f"  [FUNDING BLOCK] {symbol} LONG blocked — "
+                  f"funding {fr*100:+.4f}%/8h (longs overcrowded)")
+            return None
+        if direction == "short" and fr < -FUNDING_BLOCK_THRESHOLD:
+            print(f"  [FUNDING BLOCK] {symbol} SHORT blocked — "
+                  f"funding {fr*100:+.4f}%/8h (shorts overcrowded)")
+            return None
+
     score = 0
     combos = ["HTF_BIAS"]
     details: dict = {"htf_bias": bias, "bias_1d": bias_1d}
+    details["bias_1h"] = bias_1h
 
     # ── Step 2: 4H Order Block ───────────────────────────────────────────────
     obs_4h  = find_order_blocks(candles_4h, "4h", atr_4h, bias)
@@ -988,6 +1140,43 @@ def compute_smc_signal(symbol: str,
         score += 1
         combos.append("LIQ_SWEEP")
         details["sweep"] = sweep
+
+    # ── Step 4b: OI Confirmation (v9) ───────────────────────────────────────
+    # When a liquidity sweep is detected, validate it with OI delta.
+    # Falling OI during a sweep = existing positions being closed (exits), which
+    # is the institutional footprint we want. Rising OI = new positions being
+    # opened against us = do NOT score this bonus.
+    if sweep and oi_data and OI_FUNDING_ENABLED:
+        oi_now  = oi_data.get("open_interest", 0.0)
+        oi_prev = oi_data.get("prev_oi")
+        if oi_prev and oi_prev > 0:
+            oi_delta_pct = (oi_now - oi_prev) / oi_prev
+            if oi_delta_pct < -OI_CONFIRM_DROP_PCT:
+                score += 1
+                combos.append("OI_CONFIRM")
+                details["oi_delta_pct"] = round(oi_delta_pct * 100, 2)
+                print(f"    [OI CONFIRM] {symbol} OI dropped "
+                      f"{oi_delta_pct*100:.2f}% — confirming sweep exit")
+            else:
+                print(f"    [OI] {symbol} OI delta {oi_delta_pct*100:+.2f}% "
+                      f"— insufficient drop for OI_CONFIRM (need < -{OI_CONFIRM_DROP_PCT*100:.0f}%)")
+
+    # ── Step 4c: Funding Alignment Bonus (v9) ───────────────────────────────
+    # When the funding rate is mildly against the crowded side (i.e. in our
+    # favour), it means the over-leveraged crowd is being squeezed in our
+    # direction. This is a +1 bonus, not a gate.
+    if oi_data and OI_FUNDING_ENABLED:
+        fr = oi_data.get("funding_rate", 0.0)
+        funding_aligned = (
+            (direction == "long"  and fr < -FUNDING_ALIGN_THRESHOLD) or
+            (direction == "short" and fr >  FUNDING_ALIGN_THRESHOLD)
+        )
+        if funding_aligned:
+            score += 1
+            combos.append("FUNDING_ALIGN")
+            details["funding_rate"] = fr
+            print(f"    [FUNDING ALIGN] {symbol} {direction.upper()} — "
+                  f"funding {fr*100:+.4f}%/8h favours direction")
 
     # ── Step 5: 15M MSB ─────────────────────────────────────────────────────
     if detect_msb(candles_15m, direction):
@@ -1129,9 +1318,9 @@ def compute_smc_signal(symbol: str,
         if swing_highs_4h:
             tp2 = min(swing_highs_4h)   # nearest (lowest) confirmed swing high above price
         else:
-            # Fallback: any candle high above price; then fixed multiple.
+            # Fallback: nearest candle high above price; then fixed multiple.
             highs_4h = [c["h"] for c in _lookback_4h if c["h"] > cur_p]
-            tp2 = max(highs_4h) if highs_4h else exact_entry + risk * 4.0
+            tp2 = min(highs_4h) if highs_4h else exact_entry + risk * 4.0
         if tp2 < tp1:
             tp2 = exact_entry + risk * 3.0
         # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
@@ -1151,7 +1340,7 @@ def compute_smc_signal(symbol: str,
             tp2 = max(swing_lows_4h)   # nearest (highest) confirmed swing low below price
         else:
             lows_4h = [c["l"] for c in _lookback_4h if c["l"] < cur_p]
-            tp2 = min(lows_4h) if lows_4h else exact_entry - risk * 4.0
+            tp2 = max(lows_4h) if lows_4h else exact_entry - risk * 4.0
         if tp2 > tp1:
             tp2 = exact_entry - risk * 3.0
         # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
@@ -1216,6 +1405,8 @@ def compute_smc_signal(symbol: str,
         combos_hit=combos,
         fib=fib,
         details=details,
+        funding_rate=oi_data.get("funding_rate") if oi_data else None,
+        oi_usd=oi_data.get("open_interest") if oi_data else None,
         timestamp=ts,
     )
 
@@ -1254,6 +1445,8 @@ def format_signal_message(sig: SMCSignal) -> str:
         "15M_OB_FVG":    "15M OB/FVG Entry",
         "FIB_GOLDEN":    "Fib Golden Zone 0.618–0.786",
         "FIB_LEVEL":     f"Fib Level ({sig.details.get('fib_zone', '')})",
+        "OI_CONFIRM":    "OI declining (exit confirmed)",
+        "FUNDING_ALIGN": "Funding aligned (squeeze risk)",
     }
     combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
 
@@ -1278,7 +1471,8 @@ def format_signal_message(sig: SMCSignal) -> str:
     entry_src    = sig.details.get("entry_source", "Zone")
     htf_bias     = sig.details.get("htf_bias", "").upper()
     bias_1d      = sig.details.get("bias_1d", "neutral").upper()
-    max_score    = 8
+    bias_1h_str  = sig.details.get("bias_1h", "").upper()
+    max_score    = 9
 
     rr1 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_1, sig.direction)
     rr2 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_2, sig.direction)
@@ -1291,9 +1485,27 @@ def format_signal_message(sig: SMCSignal) -> str:
     else:
         cur_price_line = ""
 
+    # Derivatives section (v9): show funding + OI when available
+    deriv_section = ""
+    if sig.funding_rate is not None or "oi_delta_pct" in sig.details:
+        deriv_section = "\n<b>Derivatives (v9)</b>\n"
+        if sig.funding_rate is not None:
+            fr = sig.funding_rate
+            if sig.direction == "long":
+                fr_label = "shorts overcrowded — squeeze risk ↑" if fr < -FUNDING_ALIGN_THRESHOLD else "neutral / mild"
+            else:
+                fr_label = "longs overcrowded — squeeze risk ↓" if fr > FUNDING_ALIGN_THRESHOLD else "neutral / mild"
+            deriv_section += f"  Funding:   <code>{fr*100:+.4f}%/8h</code>  ({fr_label})\n"
+        if "oi_delta_pct" in sig.details:
+            oi_d = sig.details["oi_delta_pct"]
+            deriv_section += f"  OI change: <code>{oi_d:+.2f}%</code>  (confirming exit)\n"
+        if sig.oi_usd is not None and sig.oi_usd > 0:
+            oi_fmt = f"${sig.oi_usd/1e6:.1f}M" if sig.oi_usd >= 1e6 else f"${sig.oi_usd/1e3:.0f}K"
+            deriv_section += f"  OI total:  <code>{oi_fmt}</code>\n"
+
     msg = (
         f"<b>{dir_marker} {sig.symbol} — {dir_label}</b>  |  Grade <b>{sig.signal_grade}</b>  |  {sig.confluence}/{max_score}\n"
-        f"1D: <b>{bias_1d}</b>  |  4H: <b>{htf_bias}</b>  |  {sig.timestamp}\n"
+        f"1D: <b>{bias_1d}</b>  |  4H: <b>{htf_bias}</b>  |  1H: <b>{bias_1h_str}</b>  |  {sig.timestamp}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{cur_price_line}"
         f"\n<b>Entry Zone</b> ({entry_src})\n"
@@ -1305,8 +1517,9 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP1:</b>        <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{deriv_section}"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v8 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
+        f"\n<i>SMC Signal Engine v9 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
     )
     return msg
 
@@ -1394,7 +1607,8 @@ def scan_symbol(symbol: str) -> SMCSignal | None:
                       f"current TR={current_atr:.6f} > 3× avg ATR({avg_atr_20:.6f})")
                 return None
 
-        return compute_smc_signal(symbol, c15m, c1h, c4h, c1d)
+        oi_data = get_oi_funding(symbol)
+        return compute_smc_signal(symbol, c15m, c1h, c4h, c1d, oi_data=oi_data)
     except Exception as e:
         print(f"  [SCAN ERROR] {symbol}: {e}")
         return None
@@ -1431,6 +1645,12 @@ def fetch_all_mids() -> dict[str, float]:
 def run_scan(all_mids: dict | None = None) -> None:
     global _last_scan_ts, _atr_cache
     _atr_cache = {}   # PERF-02: clear per-run ATR memoization cache
+
+    # ── OI / Funding batch fetch (v9) ─────────────────────────────────────────
+    # Populate _oi_funding_data once per scan run. All per-symbol workers read
+    # from this dict via get_oi_funding() — zero additional API calls per symbol.
+    fetch_all_oi_funding()
+
     print(f"\n[SCAN] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
           f"— {len(WATCHLIST)} symbols")
 
@@ -1488,8 +1708,8 @@ def run_scan(all_mids: dict | None = None) -> None:
     for symbol in WATCHLIST:
         sig = results.get(symbol)
         if sig:
-            # BTC regime: block altcoin longs (allow BTC itself through)
-            if btc_bear and sig.direction == "long" and symbol != BTC_SYMBOL:
+            # BTC regime: block longs during confirmed bear (BTC itself is NOT exempt)
+            if btc_bear and sig.direction == "long":
                 is_strong_breakout = (
                     sig.signal_grade == "A+"
                     and "15M_MSB" in sig.combos_hit
@@ -1505,7 +1725,7 @@ def run_scan(all_mids: dict | None = None) -> None:
                     print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
                     continue
             # IMP-03: block altcoin shorts when BTC is in a strong bull regime
-            if btc_bull and sig.direction == "short" and symbol != BTC_SYMBOL:
+            if btc_bull and sig.direction == "short":
                 if BTC_REGIME_BLOCKS_SHORTS:
                     is_strong_breakdown = (
                         sig.signal_grade == "A+"
@@ -1671,13 +1891,16 @@ def run_scan(all_mids: dict | None = None) -> None:
 
         msg    = format_signal_message(sig)
         msg_id = send_telegram_get_id(msg)
-        mark_fired(sig)
         if msg_id:
+            mark_fired(sig)
             track_active_signal(sig, msg_id)
-        print(f"  📤 Sent: {sig.symbol} {sig.direction.upper()} "
-              f"{sig.signal_grade} | Entry: {fmt_price(sig.exact_entry)} "
-              f"| dist: {sig.details.get('entry_dist_pct', 0):.1f}% "
-              f"| msg_id: {msg_id}")
+            print(f"  📤 Sent: {sig.symbol} {sig.direction.upper()} "
+                  f"{sig.signal_grade} | Entry: {fmt_price(sig.exact_entry)} "
+                  f"| dist: {sig.details.get('entry_dist_pct', 0):.1f}% "
+                  f"| msg_id: {msg_id}")
+        else:
+            print(f"  ⚠️  TG send failed for {sig.symbol} {sig.direction.upper()} "
+                  f"— NOT marking as fired (will retry next scan)")
         time.sleep(0.5)
 
 
@@ -1865,21 +2088,22 @@ def check_reactions(all_mids: dict) -> None:
                 continue
 
             # Phase 1: has price entered the entry zone yet?
-            # NOTE: We use zone BOUNDS (not exact_entry) to detect a zone touch.
-            # With a 15-minute scan interval, price can dip into the zone and bounce
-            # before the next scan fires — using the tighter exact_entry point would
-            # produce phantom "missed" outcomes for limit orders that filled and reversed.
-            # Zone-bound detection is intentionally wider to catch these fills.
-            # For exact fill confirmation, OHLC candle data would be required; the
-            # mid-price approach is a known limitation documented in PERF-01.
+            # NOTE: We use exact_entry (the limit order price) to detect a fill.
+            # This is conservative — a wick that touches the zone top but not the exact
+            # limit price will not be counted as entered. This is preferable to the
+            # alternative: using zone bounds caused trades to be marked "entered" on the
+            # first scan after the signal, before the limit order could realistically fill,
+            # corrupting win-rate memory with phantom losses.
+            # Mid-price limitations still apply: intrabar wicks between scans are not
+            # detected. This is a known limitation documented in PERF-01.
             entry_zone_low_s  = s.get("entry_zone_low",  exact_entry)
             entry_zone_high_s = s.get("entry_zone_high", exact_entry)
             if direction == "long":
-                in_zone       = price <= entry_zone_high_s   # price dipped anywhere into the zone
+                in_zone       = price <= exact_entry          # price must reach the limit order price
                 past_sl       = bar_low  <= sl
                 tp1_pre_entry = bar_high >= tp1   # bar spiked to TP1 without entering zone
             else:
-                in_zone       = price >= entry_zone_low_s    # price rose anywhere into the zone
+                in_zone       = price >= exact_entry          # price must reach the limit order price
                 past_sl       = bar_high >= sl
                 tp1_pre_entry = bar_low  <= tp1   # bar dropped to TP1 without entering zone
 
@@ -1933,6 +2157,7 @@ def check_reactions(all_mids: dict) -> None:
                 s["tp1_hit"] = True
             react_to_message(msg_id, "🏆")
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
+            _fired_signals.pop(key, None)   # ← NEW: clear cooldown after full win; allow re-entry
             s["resolved"] = True
             to_drop.append(key)
 
@@ -2207,12 +2432,13 @@ def _shutdown_handler(signum, frame):
 
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v7.0  [single-scan mode]")
+    print("  SMC Signal Engine v9.0  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
     print("  Upgrades: Session filter | Volume gate | BTC regime")
     print("            TP2 1:3 gate | Multi-bar sweep | Win rate memory")
+    print("  v9 NEW:   OI confirmation | Funding hard-block + align bonus")
     print("  Perf: Parallel scan (5 workers) | Candle/ATR caching")
     print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
     print("=" * 60)
