@@ -28,7 +28,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "9.0"   # update this to change all version references automatically
+VERSION = "10.0"  # update this to change all version references automatically
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -61,8 +61,16 @@ DEAD_ZONE_END_H   = 13
 
 # ── VOLUME CONFIRMATION (High priority upgrade) ───────────────────────────────
 # Require sweep candle volume > N× average volume to filter fake sweeps
-VOLUME_GATE_ENABLED     = True
-VOLUME_GATE_MULTIPLIER  = 1.4   # sweep volume must be > 1.4× the 20-bar avg
+VOLUME_GATE_ENABLED = True
+
+# Session-aware volume multipliers (v10).
+# During peak sessions (London/NY) a strict 1.4× threshold filters fake sweeps.
+# During off-peak and weekends the threshold relaxes — low absolute volume is
+# expected and a flat 1.4× would suppress all valid sweeps (see v9 log: Jun 27).
+VOLUME_GATE_MULTIPLIER_LONDON  = 1.4   # 07:00–12:00 UTC — full liquidity
+VOLUME_GATE_MULTIPLIER_NY      = 1.4   # 13:00–20:00 UTC — full liquidity
+VOLUME_GATE_MULTIPLIER_ASIA    = 1.1   # 00:00–07:00 UTC — thinner market
+VOLUME_GATE_MULTIPLIER_OFFPEAK = 1.0   # weekends / dead zone — above avg is enough
 
 # ── BTC REGIME FILTER (Medium priority upgrade) ───────────────────────────────
 # Block altcoin longs when BTC is in a confirmed bear regime
@@ -95,9 +103,11 @@ FUNDING_BLOCK_THRESHOLD = 0.0005    # 0.05%/8h — extreme crowding, block the s
 # Scoring bonus thresholds: mild directional bias in your favour → +1 point.
 FUNDING_ALIGN_THRESHOLD = 0.0001    # 0.01%/8h — noticeable but not extreme
 
-# OI confirmation: OI must drop by at least this fraction between two consecutive
-# scan snapshots to count as "open interest confirming an exit" on a sweep.
-OI_CONFIRM_DROP_PCT = 0.03          # 3% OI decline since last snapshot
+# OI spike block: if OI has grown by more than this fraction between two consecutive
+# scan snapshots during a sweep, new leveraged positions are opening against the
+# signal direction — block the signal entirely rather than awarding a bonus point.
+# A 5% OI increase in 15 minutes indicates fresh positioning against the setup.
+OI_SPIKE_BLOCK_PCT = 0.05           # 5% OI growth since last snapshot → hard block
 
 # ── ENTRY ZONE % DISTANCE GATE (run_scan) ─────────────────────────────────────
 # Second, independent proximity gate applied later in run_scan(): drop signals
@@ -109,6 +119,15 @@ MAX_ENTRY_DIST_PCT = 1.2   # max % distance from current price to entry zone top
 # ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
 SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
+
+# ── WEEKEND MODE (v10) ────────────────────────────────────────────────────────
+# On Saturday and Sunday, volume is structurally lower across all pairs.
+# Weekend mode relaxes the volume gate (handled by get_volume_multiplier() in
+# Change 2) and raises MIN_CONFLUENCE_SCORE by 1 to compensate — fewer signals
+# but only the cleanest ones pass. Set to False to disable and use the same
+# thresholds 7 days a week.
+WEEKEND_MODE_ENABLED = True
+WEEKEND_MIN_CONFLUENCE_SCORE = 5   # stricter gate on weekends (vs. 4 on weekdays)
 
 # ── WIN RATE MEMORY (Later upgrade) ──────────────────────────────────────────
 WIN_RATE_FILE = pathlib.Path("win_rate.json")
@@ -135,10 +154,14 @@ FIB_TOLERANCE_PCT = 0.005   # 0.5% tolerance for "at a fib level"
 FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
-# Max score is 8: 6 base factors + 1 Fib confluence + 1 Fib golden zone bonus
-MIN_CONFLUENCE_SCORE  = 5   # was 6; HTF_BIAS no longer contributes a point
-STRONG_SIGNAL_SCORE   = 5   # A grade = minimum passing (score exactly 5)
-APLUS_SIGNAL_SCORE    = 6   # A+ grade = strong confirmation (score 6 or 7)
+# Max score is 8: 6 base factors + 1 Fib + 1 Funding align.
+# v10 recalibration: gate lowered to 4 to widen the funnel; A+ raised to 7
+# so only genuinely stacked setups earn the top grade. The downstream direction
+# cap (max 2 per side) and sector cap (max 1 per sector) act as the real
+# quality filter on the final batch — the confluence gate is a coarse pre-filter.
+MIN_CONFLUENCE_SCORE  = 4   # was 5; downstream caps enforce quality
+STRONG_SIGNAL_SCORE   = 5   # A  grade — solid confirmation
+APLUS_SIGNAL_SCORE    = 7   # A+ grade — raised from 6; requires near-perfect stack
 
 # ── INTERVAL MAP ─────────────────────────────────────────────────────────────
 INTERVAL_MS = {
@@ -558,21 +581,43 @@ def calc_avg_volume(candles: list[dict], period: int = 20) -> float:
     return sum(vols) / len(vols) if vols else 0.0
 
 
+def get_volume_multiplier() -> float:
+    """
+    Return the appropriate VOLUME_GATE_MULTIPLIER for the current UTC time.
+    Peak sessions (London, NY) use the strict 1.4× threshold.
+    Off-peak hours and weekends use relaxed thresholds to avoid suppressing all
+    sweeps during structurally valid but low-absolute-volume periods.
+    """
+    now     = datetime.now(timezone.utc)
+    weekday = now.weekday()   # 0=Mon … 4=Fri, 5=Sat, 6=Sun
+    hour    = now.hour
+    if weekday >= 5:                                     # Saturday or Sunday
+        return VOLUME_GATE_MULTIPLIER_OFFPEAK
+    if LONDON_OPEN_H <= hour < LONDON_CLOSE_H:           # 07:00–12:00 UTC
+        return VOLUME_GATE_MULTIPLIER_LONDON
+    if NY_OPEN_H <= hour < NY_CLOSE_H:                   # 13:00–20:00 UTC
+        return VOLUME_GATE_MULTIPLIER_NY
+    return VOLUME_GATE_MULTIPLIER_ASIA                   # all other weekday hours
+
+
 def sweep_has_volume_confirmation(candles: list[dict], sweep_bar_idx: int) -> bool:
     """
-    Check that the sweep candle's volume exceeds VOLUME_GATE_MULTIPLIER × 20-bar avg.
+    Check that the sweep candle's volume exceeds the session-aware multiplier × 20-bar avg.
+    Uses get_volume_multiplier() to select the appropriate threshold for the current
+    UTC session (London/NY = 1.4×, Asia = 1.1×, weekends/off-peak = 1.0×).
     sweep_bar_idx is the absolute index into candles.
     """
     if not VOLUME_GATE_ENABLED:
         return True
     if sweep_bar_idx < 20:
         return True   # not enough history to judge — allow through
-    avg_vol  = calc_avg_volume(candles[:sweep_bar_idx], period=20)
-    sweep_vol = candles[sweep_bar_idx]["v"]
-    confirmed = sweep_vol >= avg_vol * VOLUME_GATE_MULTIPLIER
+    multiplier = get_volume_multiplier()
+    avg_vol    = calc_avg_volume(candles[:sweep_bar_idx], period=20)
+    sweep_vol  = candles[sweep_bar_idx]["v"]
+    confirmed  = sweep_vol >= avg_vol * multiplier
     if not confirmed:
         print(f"    [VOL GATE] sweep vol={sweep_vol:.2f} < "
-              f"{VOLUME_GATE_MULTIPLIER}× avg={avg_vol:.2f} — rejected")
+              f"{multiplier}× avg={avg_vol:.2f} — rejected")
     return confirmed
 
 
@@ -843,18 +888,32 @@ def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValue
 
 def detect_msb(candles: list[dict], direction: str) -> bool:
     """
-    Require TWO consecutive closed candles breaking the swing structure.
-    Single-bar breaks (news wicks, spoofs) are filtered out.
-    Uses the last two closed candles ([-1] and [-2]) — both are confirmed closed bars.
+    v10: Single confirmed close breaking swing structure, with an ATR proximity check.
+
+    The two-bar requirement (v9) was filtering valid breaks correctly but entering
+    30 minutes late — by the time two 15M bars both closed beyond structure, the
+    entry zone was often already behind price.
+
+    v10 change: require ONE confirmed closed bar beyond the swing threshold, but
+    add an ATR distance gate — the close must be within 0.5× ATR_15m of the
+    threshold. This catches the break one bar earlier while still rejecting
+    runaway candles (news spikes) where the body has moved too far for the
+    entry zone to still be reachable.
+
+    ATR is computed inline from the last ATR_LEN bars to avoid a parameter
+    threading change. This is intentional — detect_msb() is a pure structural
+    function and should not carry external state.
     """
     n = len(candles)
-    if n < MSB_LOOKBACK + MSB_SWING_BARS + 1:   # +1 for the extra confirmation bar
+    if n < MSB_LOOKBACK + MSB_SWING_BARS + 1:
         return False
 
-    cur_close  = candles[-1]["c"]
-    prev_close = candles[-2]["c"]   # second-to-last closed bar
-    lookback   = candles[-(MSB_LOOKBACK):]
-    nb         = MSB_SWING_BARS
+    cur_close = candles[-1]["c"]
+    lookback  = candles[-(MSB_LOOKBACK):]
+    nb        = MSB_SWING_BARS
+
+    # Compute ATR inline for the proximity gate
+    atr_15m = calc_atr(candles, ATR_LEN)
 
     if direction == "long":
         highs = [c["h"] for i, c in enumerate(lookback)
@@ -862,7 +921,11 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
         if not highs:
             return False
         threshold = max(highs[-3:] if len(highs) >= 3 else highs)
-        return cur_close > threshold and prev_close > threshold   # both bars above structure
+        broke_structure = cur_close > threshold
+        # ATR proximity gate: close must be within 0.5× ATR of threshold.
+        # Rejects runaway candles where the entry zone is no longer reachable.
+        close_enough    = (cur_close - threshold) < atr_15m * 0.5
+        return broke_structure and close_enough
 
     else:
         lows = [c["l"] for i, c in enumerate(lookback)
@@ -870,7 +933,9 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
         if not lows:
             return False
         threshold = min(lows[-3:] if len(lows) >= 3 else lows)
-        return cur_close < threshold and prev_close < threshold   # both bars below structure
+        broke_structure = cur_close < threshold
+        close_enough    = (threshold - cur_close) < atr_15m * 0.5
+        return broke_structure and close_enough
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1030,6 +1095,20 @@ def compute_exact_entry(direction: str,
 # MASTER SIGNAL ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def get_min_confluence_score() -> int:
+    """
+    Return the active minimum confluence score threshold.
+    On weekends (when WEEKEND_MODE_ENABLED is True) the threshold is raised by 1
+    to compensate for the relaxed volume gate — fewer but cleaner signals.
+    On weekdays the standard MIN_CONFLUENCE_SCORE applies.
+    """
+    if WEEKEND_MODE_ENABLED:
+        weekday = datetime.now(timezone.utc).weekday()
+        if weekday >= 5:   # 5=Saturday, 6=Sunday
+            return WEEKEND_MIN_CONFLUENCE_SCORE
+    return MIN_CONFLUENCE_SCORE
+
+
 def compute_smc_signal(symbol: str,
                         candles_15m: list[dict],
                         candles_1h:  list[dict],
@@ -1039,7 +1118,7 @@ def compute_smc_signal(symbol: str,
     """
     Full Combo 1 + Combo 2 + Fibonacci confluence engine.
 
-    Scoring (max 9):
+    Scoring (max 8):
       +0  HTF 4H bias (required direction gate — not scored)
       +1  4H Order Block (approaching zone)
       +1  4H or 1H Fair Value Gap
@@ -1049,7 +1128,7 @@ def compute_smc_signal(symbol: str,
       +1  Fibonacci confluence (0.382 / 0.5 / 0.618 / 0.786)
               → +2 if in golden zone (0.618–0.786)  [upgrades score by 2, not 1]
       +1  Funding alignment (shorts/longs overpaying against signal direction)
-      +1  OI confirmation (OI declining during liquidity sweep — exits confirmed)
+      OI spike (hard block — not a score point): blocks signal if OI grew >5% during sweep
     """
     if len(candles_4h) < 60 or len(candles_1h) < 60 or len(candles_15m) < 60:
         return None
@@ -1143,25 +1222,25 @@ def compute_smc_signal(symbol: str,
         combos.append("LIQ_SWEEP")
         details["sweep"] = sweep
 
-    # ── Step 4b: OI Confirmation (v9) ───────────────────────────────────────
-    # When a liquidity sweep is detected, validate it with OI delta.
-    # Falling OI during a sweep = existing positions being closed (exits), which
-    # is the institutional footprint we want. Rising OI = new positions being
-    # opened against us = do NOT score this bonus.
+    # ── Step 4b: OI Spike Block (v10) ───────────────────────────────────────
+    # When a liquidity sweep is detected, check whether OI is spiking.
+    # A rising OI during a sweep means new leveraged positions are being opened
+    # against the signal direction — smart money is NOT exiting; retail is piling
+    # in. This is the most dangerous scenario for a limit entry. Hard-block it.
     if sweep and oi_data and OI_FUNDING_ENABLED:
         oi_now  = oi_data.get("open_interest", 0.0)
         oi_prev = oi_data.get("prev_oi")
         if oi_prev and oi_prev > 0:
             oi_delta_pct = (oi_now - oi_prev) / oi_prev
-            if oi_delta_pct < -OI_CONFIRM_DROP_PCT:
-                score += 1
-                combos.append("OI_CONFIRM")
-                details["oi_delta_pct"] = round(oi_delta_pct * 100, 2)
-                print(f"    [OI CONFIRM] {symbol} OI dropped "
-                      f"{oi_delta_pct*100:.2f}% — confirming sweep exit")
+            details["oi_delta_pct"] = round(oi_delta_pct * 100, 2)
+            if oi_delta_pct > OI_SPIKE_BLOCK_PCT:
+                print(f"  [OI SPIKE BLOCK] {symbol} {direction.upper()} blocked — "
+                      f"OI spiked +{oi_delta_pct*100:.2f}% during sweep "
+                      f"(new positions opening against signal)")
+                return None
             else:
                 print(f"    [OI] {symbol} OI delta {oi_delta_pct*100:+.2f}% "
-                      f"— insufficient drop for OI_CONFIRM (need < -{OI_CONFIRM_DROP_PCT*100:.0f}%)")
+                      f"— no spike detected (threshold +{OI_SPIKE_BLOCK_PCT*100:.0f}%)")
 
     # ── Step 4c: Funding Alignment Bonus (v9) ───────────────────────────────
     # When the funding rate is mildly against the crowded side (i.e. in our
@@ -1213,7 +1292,7 @@ def compute_smc_signal(symbol: str,
     # BUG-05 fix: use a loose gate here (3) so clearly weak setups are skipped
     # cheaply, but valid setups that need Fibonacci to reach MIN_CONFLUENCE_SCORE
     # are not discarded prematurely.
-    if score < 3:
+    if score < max(3, get_min_confluence_score() - 1):
         return None
 
     # ── Build Entry Zone ─────────────────────────────────────────────────────
@@ -1274,7 +1353,8 @@ def compute_smc_signal(symbol: str,
     # BUG-05 fix: this gate now runs after Fibonacci adds its +1 or +2 points,
     # so setups that rely on Fibonacci to reach MIN_CONFLUENCE_SCORE are no
     # longer incorrectly dropped.
-    if score < MIN_CONFLUENCE_SCORE:
+    active_min = get_min_confluence_score()
+    if score < active_min:
         return None
 
     # ── Exact Entry Price ────────────────────────────────────────────────────
@@ -1447,7 +1527,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         "15M_OB_FVG":    "15M OB/FVG Entry",
         "FIB_GOLDEN":    "Fib Golden Zone 0.618–0.786",
         "FIB_LEVEL":     f"Fib Level ({sig.details.get('fib_zone', '')})",
-        "OI_CONFIRM":    "OI declining (exit confirmed)",
+        "OI_CONFIRM":    "OI declining (exit confirmed)",   # legacy — not scored in v10
         "FUNDING_ALIGN": "Funding aligned (squeeze risk)",
     }
     combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
@@ -1474,7 +1554,7 @@ def format_signal_message(sig: SMCSignal) -> str:
     htf_bias     = sig.details.get("htf_bias", "").upper()
     bias_1d      = sig.details.get("bias_1d", "neutral").upper()
     bias_1h_str  = sig.details.get("bias_1h", "").upper()
-    max_score    = 9
+    max_score    = 8
 
     rr1 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_1, sig.direction)
     rr2 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_2, sig.direction)
@@ -1521,7 +1601,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{deriv_section}"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v{VERSION} | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
+        f"\n<i>SMC Signal Engine v{VERSION} | Min confluence {get_min_confluence_score()}/{max_score}</i>\n"
     )
     return msg
 
@@ -2441,6 +2521,8 @@ def main() -> None:
     print("  Upgrades: Session filter | Volume gate | BTC regime")
     print("            TP2 1:3 gate | Multi-bar sweep | Win rate memory")
     print("  v9 NEW:   OI confirmation | Funding hard-block + align bonus")
+    print("  v10 NEW:  Session-aware vol gate | OI spike block | Confluence")
+    print("            recalibration | Single-bar MSB + ATR check | Weekend mode")
     print("  Perf: Parallel scan (5 workers) | Candle/ATR caching")
     print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
     print("=" * 60)
