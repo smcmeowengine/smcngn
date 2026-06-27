@@ -2243,11 +2243,8 @@ def check_reactions(all_mids: dict) -> None:
         # Priority: if both TP2 and SL are inside the same bar range,
         # we favour TP2 (price had to pass through TP2 to reach SL on the way back).
         if tp2_hit:
-            if not s["tp1_hit"]:
-                react_to_message(msg_id, ["🔥", "🏆"])   # send both in one call — setMessageReaction replaces, doesn't append
-                s["tp1_hit"] = True
-            else:
-                react_to_message(msg_id, "🏆")
+            s["tp1_hit"] = True   # TP2 implies price passed through TP1 — keep internal bookkeeping consistent
+            react_to_message(msg_id, "🏆")   # full winner shows only 🏆, even if 🔥 was sent earlier
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
             _fired_signals.pop(key, None)   # ← NEW: clear cooldown after full win; allow re-entry
             s["resolved"] = True
