@@ -28,6 +28,8 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
+VERSION = "9.0"   # update this to change all version references automatically
+
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
     "BTCUSDT", "ETHUSDT", "HYPEUSDT", "ZECUSDT", "NEARUSDT",
@@ -1519,7 +1521,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{deriv_section}"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v9 | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
+        f"\n<i>SMC Signal Engine v{VERSION} | Min confluence {MIN_CONFLUENCE_SCORE}/{max_score}</i>\n"
     )
     return msg
 
@@ -2432,7 +2434,7 @@ def _shutdown_handler(signum, frame):
 
 def main() -> None:
     print("=" * 60)
-    print("  SMC Signal Engine v9.0  [single-scan mode]")
+    print(f"  SMC Signal Engine v{VERSION}  [single-scan mode]")
     print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
