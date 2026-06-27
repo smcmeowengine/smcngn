@@ -2005,18 +2005,27 @@ def send_telegram_get_id(text: str) -> int | None:
             time.sleep(2)
     return None
 
-def react_to_message(message_id: int, emoji: str) -> bool:
+def react_to_message(message_id: int, emoji) -> bool:
     """
-    Send a reaction to an existing Telegram message.
+    Send a reaction (or set of reactions) to an existing Telegram message.
     Uses setMessageReaction (Bot API 7.0+).
+
+    IMPORTANT: setMessageReaction REPLACES the message's entire reaction set
+    on every call — it does not append. Passing a single emoji here twice in
+    a row (e.g. 🔥 then 🏆) will silently wipe out the first reaction. To show
+    multiple emoji at once (e.g. TP1 + TP2 hit on the same signal), pass a
+    list of emoji in ONE call: react_to_message(msg_id, ["🔥", "🏆"]).
+
+    Accepts either a single emoji string or a list/tuple of emoji strings.
     Returns True on success.
     """
+    emojis = [emoji] if isinstance(emoji, str) else list(emoji)
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/setMessageReaction"
     try:
         r = _tg_session.post(url, json={
             "chat_id":    TG_CHAT_ID,
             "message_id": message_id,
-            "reaction":   [{"type": "emoji", "emoji": emoji}],
+            "reaction":   [{"type": "emoji", "emoji": e} for e in emojis],
             "is_big":     True,
         }, timeout=10)
         data = r.json()
@@ -2235,9 +2244,10 @@ def check_reactions(all_mids: dict) -> None:
         # we favour TP2 (price had to pass through TP2 to reach SL on the way back).
         if tp2_hit:
             if not s["tp1_hit"]:
-                react_to_message(msg_id, "🔥")
+                react_to_message(msg_id, ["🔥", "🏆"])   # send both in one call — setMessageReaction replaces, doesn't append
                 s["tp1_hit"] = True
-            react_to_message(msg_id, "🏆")
+            else:
+                react_to_message(msg_id, "🏆")
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
             _fired_signals.pop(key, None)   # ← NEW: clear cooldown after full win; allow re-entry
             s["resolved"] = True
@@ -2246,8 +2256,7 @@ def check_reactions(all_mids: dict) -> None:
         elif sl_hit and tp1_hit and not s["tp1_hit"]:
             # Both SL and TP1 touched in same bar — favour TP1 hit first
             # (price had to pass TP1 before reversing to SL)
-            react_to_message(msg_id, "🔥")
-            react_to_message(msg_id, "😭")
+            react_to_message(msg_id, ["🔥", "😭"])   # both in one call — setMessageReaction replaces, doesn't append
             record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
             s["resolved"] = True
             to_drop.append(key)
