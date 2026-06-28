@@ -28,7 +28,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "10.0"  # update this to change all version references automatically
+VERSION = "10.1"  # update this to change all version references automatically
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -126,7 +126,7 @@ SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
 # Change 2) and raises MIN_CONFLUENCE_SCORE by 1 to compensate — fewer signals
 # but only the cleanest ones pass. Set to False to disable and use the same
 # thresholds 7 days a week.
-WEEKEND_MODE_ENABLED = True
+WEEKEND_MODE_ENABLED = False   # v10.1: skip weekends entirely until win-rate data justifies re-enabling
 WEEKEND_MIN_CONFLUENCE_SCORE = 4
 
 # ── WIN RATE MEMORY (Later upgrade) ──────────────────────────────────────────
@@ -488,13 +488,30 @@ def is_active_session() -> bool:
     London : 07:00–12:00 UTC
     New York: 13:00–20:00 UTC
     IMP-07: 12:00–13:00 UTC dead zone is always excluded (not even emergency-bypassed).
+
+    Fix 2 (v10.1): Weekend awareness added. WEEKEND_MODE_ENABLED now acts as a true
+    kill switch — when False, all Saturday/Sunday scans are suppressed regardless of
+    UTC hour. Previously is_active_session() checked only the hour, so a Sunday at
+    17:30 UTC would pass the NY-hours check and scan as if it were a weekday session.
+    When WEEKEND_MODE_ENABLED is True, weekend scans proceed but vol/confluence
+    thresholds are adjusted by get_volume_multiplier() and get_min_confluence_score().
     """
     if not SESSION_FILTER_ENABLED:
         return True
-    hour = datetime.now(timezone.utc).hour
+    now     = datetime.now(timezone.utc)
+    hour    = now.hour
+    weekday = now.weekday()   # 0=Mon ... 4=Fri, 5=Sat, 6=Sun
+
     # IMP-07: dead zone is unconditional — never trade during this window
     if DEAD_ZONE_START_H <= hour < DEAD_ZONE_END_H:
         return False
+
+    # Weekend gate: WEEKEND_MODE_ENABLED controls whether weekend scans run at all.
+    # False -> skip weekends entirely (recommended until win-rate data is available).
+    # True  -> allow weekend scans with relaxed vol/confluence thresholds.
+    if weekday >= 5:   # 5=Saturday, 6=Sunday
+        return WEEKEND_MODE_ENABLED
+
     in_london = LONDON_OPEN_H <= hour < LONDON_CLOSE_H
     in_ny     = NY_OPEN_H     <= hour < NY_CLOSE_H
     return in_london or in_ny
@@ -1144,6 +1161,7 @@ def compute_smc_signal(symbol: str,
     # ── Step 1: HTF Bias ─────────────────────────────────────────────────────
     bias = get_htf_bias(candles_4h)
     if bias == "neutral":
+        print(f"  [NEAR MISS] {symbol} | killer=HTF_BIAS_NEUTRAL | score=0 | dir=N/A")
         return None
     direction = "long" if bias == "bull" else "short"
 
@@ -1152,6 +1170,7 @@ def compute_smc_signal(symbol: str,
     # (or vice-versa) the setup is counter-trend — skip entirely.
     bias_1d = get_htf_bias(candles_1d) if len(candles_1d) >= 55 else "neutral"
     if bias_1d != "neutral" and bias_1d != bias:
+        print(f"  [NEAR MISS] {symbol} | killer=1D_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1D={bias_1d}")
         return None   # 4H and 1D disagree — skip
 
     # ── Step 1c: 1H Bias Alignment Filter ───────────────────────────────
@@ -1159,6 +1178,7 @@ def compute_smc_signal(symbol: str,
     # "neutral" 1H bias is acceptable — only a confirmed opposing trend blocks.
     bias_1h = get_htf_bias(candles_1h)
     if bias_1h != "neutral" and bias_1h != bias:
+        print(f"  [NEAR MISS] {symbol} | killer=1H_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1H={bias_1h}")
         return None   # 1H opposes 4H — counter-trend setup, skip
 
     # ── Step 1d: Funding Hard Block (v9) ────────────────────────────────────
@@ -1298,6 +1318,7 @@ def compute_smc_signal(symbol: str,
     # cheaply, but valid setups that need Fibonacci to reach MIN_CONFLUENCE_SCORE
     # are not discarded prematurely.
     if score < max(3, get_min_confluence_score() - 1):
+        print(f"  [NEAR MISS] {symbol} | killer=PRE_FIB_GATE | score={score} | dir={direction} | combos={combos}")
         return None
 
     # ── Build Entry Zone ─────────────────────────────────────────────────────
@@ -1315,6 +1336,7 @@ def compute_smc_signal(symbol: str,
         entry_src = "4H OB"
     else:
         # No structural zone found — do not fabricate one
+        print(f"  [NEAR MISS] {symbol} | killer=NO_ENTRY_ZONE | score={score} | dir={direction} | combos={combos}")
         return None
     details["entry_source"] = entry_src
 
@@ -1360,6 +1382,7 @@ def compute_smc_signal(symbol: str,
     # longer incorrectly dropped.
     active_min = get_min_confluence_score()
     if score < active_min:
+        print(f"  [NEAR MISS] {symbol} | killer=CONFLUENCE_GATE | score={score}/{active_min} | dir={direction} | combos={combos}")
         return None
 
     # ── Exact Entry Price ────────────────────────────────────────────────────
@@ -2534,6 +2557,7 @@ def main() -> None:
     print("  v9 NEW:   OI confirmation | Funding hard-block + align bonus")
     print("  v10 NEW:  Session-aware vol gate | OI spike block | Confluence")
     print("            recalibration | Single-bar MSB + ATR check | Weekend mode")
+    print("  v10.1:    Weekend kill switch (WEEKEND_MODE_ENABLED=False) | Near-miss logging")
     print("  Perf: Parallel scan (5 workers) | Candle/ATR caching")
     print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
     print("=" * 60)
