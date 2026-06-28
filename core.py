@@ -1708,7 +1708,7 @@ SECTOR_GROUPS = {
     "btc_eth": ["BTCUSDT", "ETHUSDT"],
     "meme":    ["DOGEUSDT", "PENGUUSDT"],
     "other":   ["HYPEUSDT", "ZECUSDT", "BNBUSDT", "TRXUSDT", "BCHUSDT",
-                 "TAOUSDT", "LINKUSDT", "XRPUSDT", "LTCUSDT", "UNIUSDT"],
+                 "TAOUSDT", "LINKUSDT", "XRPUSDT", "LTCUSDT"],
 }
 MAX_PER_SECTOR = 1   # max signals from any one sector per scan
 
