@@ -1171,9 +1171,14 @@ def compute_smc_signal(symbol: str,
                   f"funding {fr*100:+.4f}%/8h (longs overcrowded)")
             return None
         if direction == "short" and fr < -FUNDING_BLOCK_THRESHOLD:
-            print(f"  [FUNDING BLOCK] {symbol} SHORT blocked — "
-                  f"funding {fr*100:+.4f}%/8h (shorts overcrowded)")
-            return None
+            btc_regime = get_btc_regime()
+            if btc_regime == "bear":
+                print(f"  [FUNDING EXEMPT] {symbol} SHORT — bear regime, "
+                      f"funding {fr*100:+.4f}%/8h crowding ignored")
+            else:
+                print(f"  [FUNDING BLOCK] {symbol} SHORT blocked — "
+                      f"funding {fr*100:+.4f}%/8h (shorts overcrowded)")
+                return None
 
     score = 0
     combos = ["HTF_BIAS"]
