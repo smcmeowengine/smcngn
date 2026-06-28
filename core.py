@@ -1,15 +1,43 @@
 """
-SMC Signal Engine — Combo 1 + Combo 2 + Fibonacci Confluence
+SMC Signal Engine v11 — MERGED BEST-OF
 =============================================================
-Combo 1 : HTF OB (4H) + FVG + MSB
-Combo 2 : Liquidity Sweep + OB + FVG
-Combo 3 : Fibonacci 0.5 / 0.618 / 0.786 confluence layer
+Base: v10.1 (full runtime: active tracking, win-rate, state, reactions)
+Improvements from engine.py (Twilight v1.0):
 
-Timeframes : 1D (macro bias) → 4H (bias) → 1H (zone refinement) → 15M (entry trigger)
+  [NEW-1] ADX Trend Strength Filter on 1D bias
+          daily_bias() now requires ADX ≥ 20 on the 1D timeframe in addition
+          to EMA alignment. Eliminates ranging-market false signals.
+
+  [NEW-2] MSB Displacement Body Ratio
+          detect_msb() rejects doji/spinning-top candles (body/range < 0.55).
+          A doji closing past a swing level is not a displacement move.
+
+  [NEW-3] ATR-Relative Fibonacci Tolerance
+          FIB_TOLERANCE_ATR = 0.5 × ATR replaces the fixed 0.5%-of-range
+          tolerance. Tolerance auto-scales with current volatility.
+
+  [NEW-4] FVG-OB Intersection Entry Zone
+          _entry_and_stops() computes the geometric overlap of OB zone and FVG;
+          entry zone is the intersection, not one or the other. Tighter entries.
+
+  [NEW-5] Combo-Bundle Scoring (engine.py Combo A/B model)
+          Full 3-factor combo = +3 pts; 2-factor partial = +2/+1 pts.
+          Prevents hodgepodge of unrelated factors reaching the score threshold.
+
+  [NEW-6] Clean BTC Regime Logic — no override
+          Bear regime blocks altcoin longs, full stop. Removed the A+ override
+          exception (a logical contradiction with the bear regime thesis).
+
+  [KEEP]  Volatility spike filter (3× ATR) — v10.1 advantage, retained.
+  [KEEP]  Active signal tracking + reactions — v10.1, retained.
+  [KEEP]  Win rate memory — v10.1, retained.
+  [KEEP]  FIB-rescue prevention (NON_FIB_MIN=4) — v10.1, retained.
+  [KEEP]  Granular sector map from engine.py (payments / layer1_alt / privacy).
+  [KEEP]  Heartbeat on empty scan (send_no_signal_summary) — engine.py.
+
+Timeframes : 1D (macro bias + ADX) → 4H (bias) → 1H (zone refinement) → 15M (entry trigger)
 Exchange   : Hyperliquid (same API as original bot)
 Alerts     : Telegram (HTML)
-
-Signals are PREDICTIVE — exact limit entry price set BEFORE price arrives.
 """
 
 import os, time, math, threading, requests, random, json, pathlib, sys
@@ -28,7 +56,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "10.1"  # update this to change all version references automatically
+VERSION = "11.0"  # merged: v10.1 runtime + engine.py signal quality improvements
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -127,7 +155,7 @@ SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
 # but only the cleanest ones pass. Set to False to disable and use the same
 # thresholds 7 days a week.
 WEEKEND_MODE_ENABLED = False   # v10.1: skip weekends entirely until win-rate data justifies re-enabling
-WEEKEND_MIN_CONFLUENCE_SCORE = 4
+WEEKEND_MIN_CONFLUENCE_SCORE = 6   # 1 above MIN_CONFLUENCE_SCORE — tighter on weekends
 
 # ── WIN RATE MEMORY (Later upgrade) ──────────────────────────────────────────
 WIN_RATE_FILE = pathlib.Path("win_rate.json")
@@ -145,13 +173,55 @@ MSB_LOOKBACK       = 20
 MSB_SWING_BARS     = 3
 ATR_LEN            = 14
 
+# ── ADX TREND FILTER (NEW-1 from engine.py) ──────────────────────────────────
+# 1D ADX must be ≥ this value for the bias to be considered "trending".
+# Prevents signals in ranging/choppy markets where EMA alignment is unreliable.
+ADX_PERIOD        = 14
+ADX_MIN_1D        = 20   # require ADX ≥ 20 on the daily timeframe
+
+# ── EMA SEPARATION FILTER ─────────────────────────────────────────────────────
+# Minimum gap between fast and slow EMAs (as a fraction of ATR) before bias
+# is considered established. Already present in get_htf_bias(); kept here as
+# a documented constant for the 1D daily_bias() implementation.
+EMA_SEP_MIN_ATR   = 0.3  # EMAs < 0.3× ATR apart → choppy → neutral
+
+# ── MSB DISPLACEMENT BODY RATIO (NEW-2 from engine.py) ───────────────────────
+# Minimum body/range ratio for the MSB candle. Doji and spinning tops are
+# excluded — only true displacement candles (large body relative to range)
+# are accepted as valid market structure breaks.
+MSB_BODY_RATIO_MIN = 0.55  # body/range ≥ 55% required
+
+# ── ATR-RELATIVE FIB TOLERANCE (NEW-3 from engine.py) ────────────────────────
+# Replaces the fixed FIB_TOLERANCE_PCT. Tolerance = 0.5 × ATR_15m, so it
+# scales with volatility: tight on slow markets, wider on fast ones.
+FIB_TOLERANCE_ATR  = 0.5  # 0.5 × current ATR_15m
+
 # ── FIBONACCI CONFIG ─────────────────────────────────────────────────────────
 # Key retracement levels (golden zone = 0.618–0.786)
 FIB_LEVELS        = [0.382, 0.5, 0.618, 0.786]
 FIB_GOLDEN_LOW    = 0.618
 FIB_GOLDEN_HIGH   = 0.786
-FIB_TOLERANCE_PCT = 0.005   # 0.5% tolerance for "at a fib level"
+FIB_TOLERANCE_PCT = 0.005   # kept for legacy fallback; primary tolerance is FIB_TOLERANCE_ATR
 FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
+
+# ── GRANULAR SECTOR MAP (NEW from engine.py) ─────────────────────────────────
+# More granular than SECTOR_GROUPS in v10.1; separates payments, privacy,
+# layer1_alt vs eth_l1, and distinguishes ETH from SOL/AVAX/SUI.
+# Used by run_scan() sector cap logic (max 1 per sector per batch).
+SECTOR_MAP: dict[str, str] = {
+    "BTCUSDT":    "btc",
+    "ETHUSDT":    "eth",
+    "SOLUSDT":    "eth_l1", "AVAXUSDT": "eth_l1", "SUIUSDT": "eth_l1", "APTUSDT": "eth_l1",
+    "NEARUSDT":   "eth_l1",
+    "BNBUSDT":    "bnb",
+    "XRPUSDT":    "payments", "XLMUSDT": "payments", "TRXUSDT": "payments", "LTCUSDT": "payments",
+    "DOGEUSDT":   "meme",    "PENGUUSDT": "meme",
+    "ADAUSDT":    "layer1_alt", "DOTUSDT": "layer1_alt", "TAOUSDT": "layer1_alt",
+    "LINKUSDT":   "defi",    "AAVEUSDT": "defi", "UNIUSDT": "defi",
+    "ONDOUSDT":   "defi",    "PENDLEUSDT": "defi",
+    "HYPEUSDT":   "hype",
+    "ZECUSDT":    "privacy", "BCHUSDT": "privacy",
+}
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
 # Max score is 8: 6 base factors + 1 Fib + 1 Funding align.
@@ -159,7 +229,7 @@ FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 # so only genuinely stacked setups earn the top grade. The downstream direction
 # cap (max 2 per side) and sector cap (max 1 per sector) act as the real
 # quality filter on the final batch — the confluence gate is a coarse pre-filter.
-MIN_CONFLUENCE_SCORE  = 4   # was 5; downstream caps enforce quality
+MIN_CONFLUENCE_SCORE  = 5   # raised from 4: combo-bundle scoring produces higher raw scores (full A+B=6 before Fib)
 STRONG_SIGNAL_SCORE   = 5   # A  grade — solid confirmation
 APLUS_SIGNAL_SCORE    = 7   # A+ grade — raised from 6; requires near-perfect stack
 
@@ -478,6 +548,54 @@ def calc_ema(values: list[float], period: int) -> list[float]:
         out.append(v * k + out[-1] * (1 - k))
     return out   # no zero-padding
 
+
+def calc_adx(candles: list[dict], period: int = ADX_PERIOD) -> float:
+    """
+    Wilder's ADX — returns the last ADX value (0–100).
+    NEW-1: used in daily_bias() to require ADX ≥ ADX_MIN_1D before accepting
+    a trending bias. Returns 0.0 when insufficient data.
+    """
+    n = len(candles)
+    if n < period * 2 + 1:
+        return 0.0
+
+    plus_dm, minus_dm, tr_list = [], [], []
+    for i in range(1, n):
+        h_diff = candles[i]["h"] - candles[i-1]["h"]
+        l_diff = candles[i-1]["l"] - candles[i]["l"]
+        plus_dm.append(h_diff if h_diff > l_diff and h_diff > 0 else 0)
+        minus_dm.append(l_diff if l_diff > h_diff and l_diff > 0 else 0)
+        tr_list.append(max(
+            candles[i]["h"] - candles[i]["l"],
+            abs(candles[i]["h"] - candles[i-1]["c"]),
+            abs(candles[i]["l"] - candles[i-1]["c"]),
+        ))
+
+    def wilder_smooth(data: list[float], p: int) -> list[float]:
+        out = [sum(data[:p])]
+        for v in data[p:]:
+            out.append(out[-1] - out[-1] / p + v)
+        return out
+
+    tr_s  = wilder_smooth(tr_list, period)
+    pdm_s = wilder_smooth(plus_dm, period)
+    mdm_s = wilder_smooth(minus_dm, period)
+
+    dx_list = []
+    for t, p, m in zip(tr_s, pdm_s, mdm_s):
+        if t == 0:
+            continue
+        pdi = 100 * p / t
+        mdi = 100 * m / t
+        denom = pdi + mdi
+        if denom == 0:
+            continue
+        dx_list.append(100 * abs(pdi - mdi) / denom)
+
+    if len(dx_list) < period:
+        return 0.0
+    return sum(dx_list[-period:]) / period
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SESSION FILTER  (High priority upgrade)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -518,8 +636,76 @@ def is_active_session() -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BTC REGIME FILTER  (Medium priority upgrade)
+# 1D BIAS WITH ADX STRENGTH (NEW-1 — from engine.py)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+_daily_bias_cache: dict = {}   # {symbol: {"bias": str, "ts": float}}
+_DAILY_BIAS_TTL_S = 60 * 60   # 1-hour TTL — daily candles don't change mid-scan
+
+def daily_bias(symbol: str) -> str:
+    """
+    Return 'bull', 'bear', or 'neutral' for the daily timeframe.
+
+    NEW-1: Requires BOTH:
+      1. EMA21 > EMA50 (bull) or EMA21 < EMA50 (bear) with directional momentum
+      2. ADX(14) ≥ ADX_MIN_1D (20) — market must be trending, not ranging
+
+    This is the single highest-impact improvement from engine.py: v10.1 uses
+    EMA-only bias and fires in choppy/ranging markets. Adding the ADX gate
+    eliminates those false signals while preserving all trending-market signals.
+
+    Falls back to 'neutral' if insufficient data or ADX threshold not met.
+    """
+    now = time.time()
+    cached = _daily_bias_cache.get(symbol)
+    if cached and (now - cached["ts"]) < _DAILY_BIAS_TTL_S:
+        return cached["bias"]
+
+    try:
+        candles_1d = get_candles_1d_cached(symbol)
+        if len(candles_1d) < 55:
+            result = "neutral"
+        else:
+            closes = [c["c"] for c in candles_1d]
+            ema21  = calc_ema(closes, 21)
+            ema50  = calc_ema(closes, 50)
+            if len(ema21) < 3 or len(ema50) < 3:
+                result = "neutral"
+            else:
+                e21, e50 = ema21[-1], ema50[-1]
+                # EMA separation gate — avoids choppy/sideways bias
+                atr_1d  = calc_atr(candles_1d, ATR_LEN)
+                ema_sep = abs(e21 - e50)
+                if ema_sep < atr_1d * EMA_SEP_MIN_ATR:
+                    result = "neutral"
+                elif (closes[-1] > e21 > e50 and
+                      ema21[-1] > ema21[-3] and ema50[-1] > ema50[-3]):
+                    # ADX gate: only confirm bull bias when market is trending
+                    adx_val = calc_adx(candles_1d, ADX_PERIOD)
+                    if adx_val >= ADX_MIN_1D:
+                        result = "bull"
+                    else:
+                        print(f"    [{symbol}] 1D bias BULL but ADX={adx_val:.1f} < {ADX_MIN_1D} — neutral")
+                        result = "neutral"
+                elif (closes[-1] < e21 < e50 and
+                      ema21[-1] < ema21[-3] and ema50[-1] < ema50[-3]):
+                    adx_val = calc_adx(candles_1d, ADX_PERIOD)
+                    if adx_val >= ADX_MIN_1D:
+                        result = "bear"
+                    else:
+                        print(f"    [{symbol}] 1D bias BEAR but ADX={adx_val:.1f} < {ADX_MIN_1D} — neutral")
+                        result = "neutral"
+                else:
+                    result = "neutral"
+    except Exception as e:
+        print(f"    [{symbol}] daily_bias error: {e}")
+        result = "neutral"
+
+    _daily_bias_cache[symbol] = {"bias": result, "ts": now}
+    return result
+
+
+
 
 _btc_regime_cache: dict = {}   # {"regime": "bull"|"bear"|"neutral", "ts": float}
 _BTC_REGIME_TTL_S = 60 * 30   # recheck every 30 minutes
@@ -671,7 +857,8 @@ def calc_fib_levels(swing_high: float, swing_low: float) -> dict:
     }
 
 def find_fib_confluence(candles_4h: list[dict], direction: str,
-                         entry_zone_high: float, entry_zone_low: float) -> FibResult | None:
+                         entry_zone_high: float, entry_zone_low: float,
+                         atr_15m: float = 0.0) -> FibResult | None:
     """
     Find the most recent significant swing on 4H and check if
     the entry zone sits at a key Fibonacci retracement level.
@@ -680,6 +867,9 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
     For SHORT: draw fib from swing HIGH to swing LOW (retracement going up)
 
     Golden zone (0.618–0.786) = highest probability.
+
+    NEW-3 (v11): atr_15m parameter enables ATR-relative tolerance
+    (FIB_TOLERANCE_ATR × atr_15m) instead of the fixed range-% tolerance.
     """
     n      = len(candles_4h)
     lb     = min(FIB_SWING_LOOKBACK + 2, n - 2)   # BUG-24: +2 recovers edge bars excluded by swing detector's 2-bar side requirement
@@ -749,10 +939,19 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
     nearest_level = 0.0
     nearest_dist  = float("inf")
 
+    # NEW-3: ATR-relative fib tolerance (engine.py).
+    # FIB_TOLERANCE_ATR = 0.5 × ATR_15m auto-scales with volatility.
+    # Tighter on slow markets, wider on fast ones. The ATR is passed in
+    # from compute_smc_signal() via the atr_15m parameter.
+    # Falls back to range-% tolerance if atr_15m is zero (safety guard).
     for name, lvl in key_levels.items():
         dist = abs(zone_mid - lvl)
-        tol  = rng * FIB_TOLERANCE_PCT       # BUG-04 fix: removed *3 multiplier; tol is now enforced below
-        if dist < tol and dist < nearest_dist:   # gate: zone must be within 0.5% of a fib level
+        # Primary: ATR-relative tolerance (NEW-3); fallback: range-% (legacy)
+        if atr_15m > 0:
+            tol = FIB_TOLERANCE_ATR * atr_15m
+        else:
+            tol  = rng * FIB_TOLERANCE_PCT       # BUG-04 fix: removed *3 multiplier; tol is now enforced below
+        if dist < tol and dist < nearest_dist:   # gate: zone must be within tolerance of a fib level
             nearest_dist  = dist
             nearest_name  = name
             nearest_level = lvl
@@ -906,6 +1105,9 @@ def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValue
 def detect_msb(candles: list[dict], direction: str) -> bool:
     """
     v10: Single confirmed close breaking swing structure, with an ATR proximity check.
+    v11 NEW-2: Also requires body/range ratio ≥ MSB_BODY_RATIO_MIN (0.55).
+    A doji or spinning top closing past a swing level is not a displacement move.
+    Rejects indecision candles regardless of whether they closed past structure.
 
     The two-bar requirement (v9) was filtering valid breaks correctly but entering
     30 minutes late — by the time two 15M bars both closed beyond structure, the
@@ -926,6 +1128,15 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
         return False
 
     cur_close = candles[-1]["c"]
+    cur_range = candles[-1]["h"] - candles[-1]["l"]
+    cur_body  = abs(candles[-1]["c"] - candles[-1]["o"])
+
+    # NEW-2: body/range filter — rejects doji and spinning tops as MSB candles
+    if cur_range > 0:
+        body_ratio = cur_body / cur_range
+        if body_ratio < MSB_BODY_RATIO_MIN:
+            return False   # indecision candle — not a displacement move
+
     lookback  = candles[-(MSB_LOOKBACK):]
     nb        = MSB_SWING_BARS
 
@@ -1165,10 +1376,11 @@ def compute_smc_signal(symbol: str,
         return None
     direction = "long" if bias == "bull" else "short"
 
-    # ── Step 1b: 1D Bias Alignment Filter ───────────────────────────────────
-    # Only trade with the daily trend.  If 4H is bullish but 1D is bearish
-    # (or vice-versa) the setup is counter-trend — skip entirely.
-    bias_1d = get_htf_bias(candles_1d) if len(candles_1d) >= 55 else "neutral"
+    # ── Step 1b: 1D Bias Alignment Filter (ADX-gated via daily_bias) ───────────
+    # NEW-1: daily_bias() requires ADX ≥ ADX_MIN_1D in addition to EMA alignment.
+    # This prevents trading in ranging/choppy daily markets even when EMAs are
+    # aligned — the single highest-impact quality improvement from engine.py.
+    bias_1d = daily_bias(symbol)
     if bias_1d != "neutral" and bias_1d != bias:
         print(f"  [NEAR MISS] {symbol} | killer=1D_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1D={bias_1d}")
         return None   # 4H and 1D disagree — skip
@@ -1216,9 +1428,8 @@ def compute_smc_signal(symbol: str,
         candidates = [ob for ob in obs_4h if ob.direction == "bear" and ob.price_low > cur_p]
         if candidates:
             near_ob = min(candidates, key=lambda x: x.price_low)
-    if near_ob:
-        score += 1
-        combos.append("4H_OB")
+    has_4h_ob = near_ob is not None
+    if has_4h_ob:
         details["4h_ob"] = {"high": near_ob.price_high, "low": near_ob.price_low}
 
     # ── Step 3: FVG (4H or 1H) ─────────────────────────────────────────────
@@ -1234,17 +1445,15 @@ def compute_smc_signal(symbol: str,
         bf = [f for f in all_fvgs if f.direction == "bear" and f.gap_low > cur_p]
         if bf:
             near_fvg = min(bf, key=lambda x: x.gap_low)
-    if near_fvg:
-        score += 1
-        combos.append("FVG")
+    has_fvg = near_fvg is not None
+    if has_fvg:
         details["fvg"] = {"high": near_fvg.gap_high, "low": near_fvg.gap_low,
                           "tf": near_fvg.timeframe}
 
     # ── Step 4: Liquidity Sweep ──────────────────────────────────────────────
     sweep = detect_liquidity_sweep(candles_1h, direction)
-    if sweep:
-        score += 1
-        combos.append("LIQ_SWEEP")
+    has_sweep = sweep is not None
+    if has_sweep:
         details["sweep"] = sweep
 
     # ── Step 4b: OI Spike Block (v10) ───────────────────────────────────────
@@ -1252,7 +1461,7 @@ def compute_smc_signal(symbol: str,
     # A rising OI during a sweep means new leveraged positions are being opened
     # against the signal direction — smart money is NOT exiting; retail is piling
     # in. This is the most dangerous scenario for a limit entry. Hard-block it.
-    if sweep and oi_data and OI_FUNDING_ENABLED:
+    if has_sweep and oi_data and OI_FUNDING_ENABLED:
         oi_now  = oi_data.get("open_interest", 0.0)
         oi_prev = oi_data.get("prev_oi")
         if oi_prev and oi_prev > 0:
@@ -1271,23 +1480,21 @@ def compute_smc_signal(symbol: str,
     # When the funding rate is mildly against the crowded side (i.e. in our
     # favour), it means the over-leveraged crowd is being squeezed in our
     # direction. This is a +1 bonus, not a gate.
+    has_funding_align = False
     if oi_data and OI_FUNDING_ENABLED:
         fr = oi_data.get("funding_rate", 0.0)
-        funding_aligned = (
+        has_funding_align = (
             (direction == "long"  and fr < -FUNDING_ALIGN_THRESHOLD) or
             (direction == "short" and fr >  FUNDING_ALIGN_THRESHOLD)
         )
-        if funding_aligned:
-            score += 1
-            combos.append("FUNDING_ALIGN")
+        if has_funding_align:
             details["funding_rate"] = fr
             print(f"    [FUNDING ALIGN] {symbol} {direction.upper()} — "
                   f"funding {fr*100:+.4f}%/8h favours direction")
 
     # ── Step 5: 15M MSB ─────────────────────────────────────────────────────
-    if detect_msb(candles_15m, direction):
-        score += 1
-        combos.append("15M_MSB")
+    has_msb = detect_msb(candles_15m, direction)
+    if has_msb:
         details["msb_15m"] = True
 
     # ── Step 6: 15M OB / FVG ────────────────────────────────────────────────
@@ -1305,13 +1512,45 @@ def compute_smc_signal(symbol: str,
         if b: near_ob_15m = min(b, key=lambda x: x.price_low)
         b = [f for f in fvgs_15m if f.direction == "bear" and f.gap_low > cur_p]
         if b: near_fvg_15m = min(b, key=lambda x: x.gap_low)
-    if near_ob_15m or near_fvg_15m:
+    has_15m_precision = (near_ob_15m is not None or near_fvg_15m is not None)
+    if near_ob_15m:
+        details["15m_ob"] = {"high": near_ob_15m.price_high, "low": near_ob_15m.price_low}
+    if near_fvg_15m:
+        details["15m_fvg"] = {"high": near_fvg_15m.gap_high, "low": near_fvg_15m.gap_low}
+
+    # ── NEW-5: Combo-Bundle Scoring (engine.py) ─────────────────────────────
+    # Replaces v10.1's flat 1-point-per-factor model.
+    # Scores are awarded per combo unit, not per individual indicator.
+    # This forces better-aligned setups and prevents a hodgepodge of unrelated
+    # factors from accumulating to the score threshold.
+    #
+    # Combo A: HTF OB (4H) + FVG (4H/1H) + 15M MSB   → full=+3, partial=+2/+1
+    # Combo B: Liquidity Sweep + 15M OB + 15M FVG      → full=+3, partial=+1
+    # Bonus:   Funding alignment                        → +1
+
+    combo_a_hits = sum([has_4h_ob, has_fvg, has_msb])
+    if combo_a_hits == 3:
+        score += 3
+        combos.append("A")
+    elif combo_a_hits == 2:
+        score += 2
+        combos.append("A-partial")
+    elif combo_a_hits == 1:
         score += 1
-        combos.append("15M_OB_FVG")
-        if near_ob_15m:
-            details["15m_ob"] = {"high": near_ob_15m.price_high, "low": near_ob_15m.price_low}
-        if near_fvg_15m:
-            details["15m_fvg"] = {"high": near_fvg_15m.gap_high, "low": near_fvg_15m.gap_low}
+        combos.append("A-weak")
+
+    combo_b_hits = sum([has_sweep, near_ob_15m is not None, near_fvg_15m is not None])
+    if combo_b_hits == 3:
+        score += 3
+        combos.append("B")
+    elif combo_b_hits == 2:
+        score += 1
+        combos.append("B-partial")
+    # combo_b_hits == 1: no bonus — single factor provides no structure
+
+    if has_funding_align:
+        score += 1
+        combos.append("FUNDING_ALIGN")
 
     # ── Gate (pre-Fib fast exit) ─────────────────────────────────────────────
     # BUG-05 fix: use a loose gate here (3) so clearly weak setups are skipped
@@ -1325,12 +1564,28 @@ def compute_smc_signal(symbol: str,
     if near_ob_15m:
         entry_high, entry_low = near_ob_15m.price_high, near_ob_15m.price_low
         entry_src = "15M OB"
+        # NEW-4: FVG-OB Intersection — refine zone to geometric overlap (engine.py)
+        # If a FVG overlaps the OB, price must fill into both zones simultaneously.
+        # Intersection is structurally tighter and reduces partial-zone entries.
+        if near_fvg_15m:
+            overlap_h = min(entry_high, near_fvg_15m.gap_high)
+            overlap_l = max(entry_low,  near_fvg_15m.gap_low)
+            if overlap_h > overlap_l:
+                entry_high, entry_low = overlap_h, overlap_l
+                entry_src = "15M OB∩FVG"
     elif near_fvg_15m:
         entry_high, entry_low = near_fvg_15m.gap_high, near_fvg_15m.gap_low
         entry_src = "15M FVG"
     elif near_fvg:
         entry_high, entry_low = near_fvg.gap_high, near_fvg.gap_low
         entry_src = f"{near_fvg.timeframe.upper()} FVG"
+        # NEW-4: also try to intersect 4H FVG with 4H OB if both exist
+        if near_ob:
+            overlap_h = min(entry_high, near_ob.price_high)
+            overlap_l = max(entry_low,  near_ob.price_low)
+            if overlap_h > overlap_l:
+                entry_high, entry_low = overlap_h, overlap_l
+                entry_src = f"{near_fvg.timeframe.upper()} FVG∩OB"
     elif near_ob:
         entry_high, entry_low = near_ob.price_high, near_ob.price_low
         entry_src = "4H OB"
@@ -1357,7 +1612,7 @@ def compute_smc_signal(symbol: str,
     if score < NON_FIB_MIN:
         fib = None   # fib cannot rescue a weak setup
     else:
-        fib = find_fib_confluence(candles_4h, direction, entry_high, entry_low)
+        fib = find_fib_confluence(candles_4h, direction, entry_high, entry_low, atr_15m)
     if fib:
         if fib.in_golden_zone:
             score += 2            # Golden zone = double bonus
@@ -1818,39 +2073,19 @@ def run_scan(all_mids: dict | None = None) -> None:
     for symbol in WATCHLIST:
         sig = results.get(symbol)
         if sig:
-            # BTC regime: block longs during confirmed bear (BTC itself is NOT exempt)
+            # NEW-6: Clean BTC regime logic — no override exception (engine.py).
+            # Bear regime blocks altcoin longs, full stop. The A+ override in v10.1
+            # was a logical contradiction: if the regime says bear, taking longs is
+            # structurally wrong regardless of confluence.
             if btc_bear and sig.direction == "long":
-                is_strong_breakout = (
-                    sig.signal_grade == "A+"
-                    and "15M_MSB" in sig.combos_hit
-                    and "LIQ_SWEEP" in sig.combos_hit
-                    and sig.confluence >= 7
-                    and sig.details.get("bias_1d", "bear") != "bear"
-                )
-                if is_strong_breakout:
-                    print(f"  [REGIME OVERRIDE] {symbol} LONG allowed — "
-                          f"strong independent breakout despite BTC bear "
-                          f"(confluence {sig.confluence}, 1D={sig.details.get('bias_1d')})")
-                else:
-                    print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
-                    continue
-            # IMP-03: block altcoin shorts when BTC is in a strong bull regime
+                print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
+                continue
+            # IMP-03 (retained): block altcoin shorts when BTC is in a strong bull regime.
+            # BTC_REGIME_BLOCKS_SHORTS=False means shorts are still evaluated on their own merit.
             if btc_bull and sig.direction == "short":
                 if BTC_REGIME_BLOCKS_SHORTS:
-                    is_strong_breakdown = (
-                        sig.signal_grade == "A+"
-                        and "15M_MSB" in sig.combos_hit
-                        and "LIQ_SWEEP" in sig.combos_hit
-                        and sig.confluence >= 7
-                        and sig.details.get("bias_1d", "bull") != "bull"
-                    )
-                    if is_strong_breakdown:
-                        print(f"  [REGIME OVERRIDE] {symbol} SHORT allowed — "
-                              f"strong independent breakdown despite BTC bull "
-                              f"(confluence {sig.confluence}, 1D={sig.details.get('bias_1d')})")
-                    else:
-                        print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime")
-                        continue
+                    print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime")
+                    continue
                 else:
                     print(f"  [BTC REGIME] {symbol} SHORT allowed — BTC_REGIME_BLOCKS_SHORTS=False")
             if is_duplicate(sig):
@@ -1915,10 +2150,7 @@ def run_scan(all_mids: dict | None = None) -> None:
     sector_counts: dict[str, int] = {}
     sector_capped: list[SMCSignal] = []
     for sig in capped:
-        sym_sector = next(
-            (s for s, syms in SECTOR_GROUPS.items() if sig.symbol in syms),
-            "other"
-        )
+        sym_sector = SECTOR_MAP.get(sig.symbol, sig.symbol)
         if sector_counts.get(sym_sector, 0) < MAX_PER_SECTOR:
             sector_capped.append(sig)
             sector_counts[sym_sector] = sector_counts.get(sym_sector, 0) + 1
@@ -1931,6 +2163,8 @@ def run_scan(all_mids: dict | None = None) -> None:
 
     if not final:
         print("  [SCAN] No signals this round.")
+        # Heartbeat (engine.py): notify Telegram so the operator knows the bot is alive.
+        send_no_signal_summary()
         return
 
     # ── Fetch current prices (reuse from caller if provided, PERF-01) ─────────
@@ -2032,6 +2266,25 @@ def send_telegram_get_id(text: str) -> int | None:
                 print(f"[TG ERROR] {e}")
             time.sleep(2)
     return None
+
+
+def send_no_signal_summary() -> None:
+    """
+    Send a brief heartbeat message when no signals pass all gates.
+    Ported from engine.py — lets the operator know the bot is alive and scanning
+    even when market conditions produce no actionable setups.
+    """
+    now = datetime.now(timezone.utc)
+    t   = _win_rate_data.get("total", {})
+    wins, losses = t.get("wins", 0), t.get("losses", 0)
+    total = wins + losses
+    wr_str = f" | WR: {wins}/{total} ({wins/total*100:.0f}%)" if total else ""
+    msg = (
+        f"🔍 <b>SMC Engine v{VERSION} — Scan Complete</b>\n"
+        f"No signals passed all gates this cycle.\n"
+        f"<i>{now:%Y-%m-%d %H:%M UTC}</i>{wr_str}"
+    )
+    send_telegram_get_id(msg)
 
 def react_to_message(message_id: int, emoji) -> bool:
     """
@@ -2549,17 +2802,19 @@ def _shutdown_handler(signum, frame):
 def main() -> None:
     print("=" * 60)
     print(f"  SMC Signal Engine v{VERSION}  [single-scan mode]")
-    print("  Combo 1 (HTF OB+FVG+MSB) + Combo 2 (Sweep+OB+FVG)")
+    print("  MERGED: v10.1 runtime + engine.py signal quality")
+    print("  Combos: Bundle-scored A (OB+FVG+MSB) + B (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
-    print("  Upgrades: Session filter | Volume gate | BTC regime")
-    print("            TP2 1:3 gate | Multi-bar sweep | Win rate memory")
-    print("  v9 NEW:   OI confirmation | Funding hard-block + align bonus")
-    print("  v10 NEW:  Session-aware vol gate | OI spike block | Confluence")
-    print("            recalibration | Single-bar MSB + ATR check | Weekend mode")
-    print("  v10.1:    Weekend kill switch (WEEKEND_MODE_ENABLED=False) | Near-miss logging")
-    print("  Perf: Parallel scan (5 workers) | Candle/ATR caching")
-    print("  Timeframes: 1D (macro bias) / 4H / 1H / 15M")
+    print("  NEW-1: ADX≥20 on 1D bias (engine.py — most impactful)")
+    print("  NEW-2: MSB body/range≥55% (no doji breaks)")
+    print("  NEW-3: ATR-relative Fib tolerance (scales with vol)")
+    print("  NEW-4: FVG∩OB intersection entry zone (tighter entries)")
+    print("  NEW-5: Combo-bundle scoring (A=3pts / B=3pts, no hodgepodge)")
+    print("  NEW-6: Clean BTC bear regime (no A+ override contradiction)")
+    print("  KEEP:  Volatility spike filter | Active signal tracking")
+    print("         Win rate memory | FIB-rescue prevention | Heartbeat")
+    print("  Timeframes: 1D+ADX / 4H / 1H / 15M")
     print("=" * 60)
 
     # Register graceful shutdown handlers so SIGTERM/SIGINT triggers a clean
