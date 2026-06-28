@@ -127,7 +127,7 @@ SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
 # but only the cleanest ones pass. Set to False to disable and use the same
 # thresholds 7 days a week.
 WEEKEND_MODE_ENABLED = True
-WEEKEND_MIN_CONFLUENCE_SCORE = 5   # stricter gate on weekends (vs. 4 on weekdays)
+WEEKEND_MIN_CONFLUENCE_SCORE = 4
 
 # ── WIN RATE MEMORY (Later upgrade) ──────────────────────────────────────────
 WIN_RATE_FILE = pathlib.Path("win_rate.json")
