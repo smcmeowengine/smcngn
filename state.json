@@ -1,6 +1,6 @@
 {
   "fired_signals": {
-    "BTCUSDT_short": 1782731738.9498844
+    "BTCUSDT_short": 1782732647.6937003
   },
   "active_signals": {
     "BTCUSDT_short": {
@@ -19,13 +19,13 @@
         "ADX_TREND",
         "FIB_GOLDEN"
       ],
-      "message_id": 1121,
+      "message_id": 1122,
       "signal_grade": "A",
       "entered": false,
       "tp1_hit": false,
       "resolved": false,
-      "sent_at": 1782731738.9498904
+      "sent_at": 1782732647.6937053
     }
   },
-  "last_scan_ts": 1782731717.982087
+  "last_scan_ts": 1782732626.6955576
 }
