@@ -1920,39 +1920,16 @@ def format_signal_message(sig: SMCSignal) -> str:
     else:
         cur_price_line = ""
 
-    # Derivatives section (v9): show funding + OI when available
-    deriv_section = ""
-    if sig.funding_rate is not None or "oi_delta_pct" in sig.details:
-        deriv_section = "\n<b>Derivatives (v9)</b>\n"
-        if sig.funding_rate is not None:
-            fr = sig.funding_rate
-            if sig.direction == "long":
-                fr_label = "shorts overcrowded — squeeze risk ↑" if fr < -FUNDING_ALIGN_THRESHOLD else "neutral / mild"
-            else:
-                fr_label = "longs overcrowded — squeeze risk ↓" if fr > FUNDING_ALIGN_THRESHOLD else "neutral / mild"
-            deriv_section += f"  Funding:   <code>{fr*100:+.4f}%/8h</code>  ({fr_label})\n"
-        if "oi_delta_pct" in sig.details:
-            oi_d = sig.details["oi_delta_pct"]
-            deriv_section += f"  OI change: <code>{oi_d:+.2f}%</code>  (confirming exit)\n"
-        if sig.oi_usd is not None and sig.oi_usd > 0:
-            oi_fmt = f"${sig.oi_usd/1e6:.1f}M" if sig.oi_usd >= 1e6 else f"${sig.oi_usd/1e3:.0f}K"
-            deriv_section += f"  OI total:  <code>{oi_fmt}</code>\n"
-
     msg = (
         f"<b>{dir_marker} {sig.symbol} — {dir_label}</b>  |  Grade <b>{sig.signal_grade}</b>  |  {sig.confluence}/{max_score}\n"
         f"1D: <b>{bias_1d}</b>{adx_str}  |  4H: <b>{htf_bias}</b>  |  1H: <b>{bias_1h_str}</b>  |  {sig.timestamp}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{cur_price_line}"
-        f"\n<b>Entry Zone</b> ({entry_src})\n"
-        f"  High: <code>{fmt_price(sig.entry_zone_high)}</code>\n"
-        f"  Low:  <code>{fmt_price(sig.entry_zone_low)}</code>\n"
-        f"\n<b>Limit Entry: <code>{fmt_price(sig.exact_entry)}</code></b>\n"
-        f"  ↳ {entry_reason}\n"
+        f"\n<b>Entry:</b>      <code>{fmt_price(sig.exact_entry)}</code>  ({entry_src})\n"
         f"\n<b>Stop Loss:</b>  <code>{fmt_price(sig.stop_loss)}</code>\n"
         f"<b>TP1:</b>        <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{deriv_section}"
         f"{fib_section}"
         f"\n<i>SMC Signal Engine v{VERSION} | Min confluence {get_min_confluence_score()}/{max_score}</i>\n"
     )
