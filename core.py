@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.4"  # v11.3 + fix details used before initialization (adx_1d write moved after dict creation)
+VERSION = "11.5"  # v11.4 + sweep vol gate → two-tier bonus (+1/+2); removes sweep_has_volume_confirmation()
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -86,18 +86,20 @@ NY_CLOSE_H     = 20
 DEAD_ZONE_START_H = 12
 DEAD_ZONE_END_H   = 13
 
-# ── VOLUME CONFIRMATION (High priority upgrade) ───────────────────────────────
-# Require sweep candle volume > N× average volume to filter fake sweeps
-VOLUME_GATE_ENABLED = True
-
-# Session-aware volume multipliers (v10).
-# During peak sessions (London/NY) a strict 1.4× threshold filters fake sweeps.
-# During off-peak and weekends the threshold relaxes — low absolute volume is
-# expected and a flat 1.4× would suppress all valid sweeps (see v9 log: Jun 27).
-VOLUME_GATE_MULTIPLIER_LONDON  = 1.4   # 07:00–12:00 UTC — full liquidity
-VOLUME_GATE_MULTIPLIER_NY      = 1.4   # 13:00–20:00 UTC — full liquidity
-VOLUME_GATE_MULTIPLIER_ASIA    = 1.1   # 00:00–07:00 UTC — thinner market
-VOLUME_GATE_MULTIPLIER_OFFPEAK = 1.0   # weekends / dead zone — above avg is enough
+# ── VOLUME CONFIRMATION (v11.5) ───────────────────────────────────────────────
+# Volume is now a scoring bonus rather than a hard gate inside detect_liquidity_sweep().
+# Low-volume sweeps are no longer blocked — they simply fail to earn the bonus,
+# and must rely on other confluence factors to reach MIN_CONFLUENCE_SCORE.
+#
+# Two-tier bonus (applied in compute_smc_signal() after sweep detection):
+#   sweep vol ≥ VOLUME_STRONG_THRESHOLD × avg  → +2 (institutional confirmation)
+#   sweep vol ≥ VOLUME_BONUS_THRESHOLD  × avg  → +1 (above-average, worth noting)
+#   sweep vol <  VOLUME_BONUS_THRESHOLD × avg  → +0 (sweep present, vol weak)
+#
+# Replaces: VOLUME_GATE_ENABLED, VOLUME_GATE_MULTIPLIER_* (x4), get_volume_multiplier(),
+#           sweep_has_volume_confirmation() — all removed in v11.5.
+VOLUME_BONUS_THRESHOLD  = 1.2   # minimum ratio for +1 sweep vol bonus
+VOLUME_STRONG_THRESHOLD = 1.5   # ratio for +2 strong institutional vol bonus
 
 # ── BTC REGIME FILTER (Medium priority upgrade) ───────────────────────────────
 # Block altcoin longs when BTC is in a confirmed bear regime
@@ -171,10 +173,11 @@ SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
 
 # ── WEEKEND MODE (v10) ────────────────────────────────────────────────────────
 # On Saturday and Sunday, volume is structurally lower across all pairs.
-# Weekend mode relaxes the volume gate (handled by get_volume_multiplier() in
-# Change 2) and raises MIN_CONFLUENCE_SCORE by 1 to compensate — fewer signals
+# Weekend mode raises MIN_CONFLUENCE_SCORE by 1 to compensate — fewer signals
 # but only the cleanest ones pass. Set to False to disable and use the same
 # thresholds 7 days a week.
+# Note: session-aware volume gate removed in v11.5; weekend vol is now handled
+# implicitly by VOLUME_BONUS_THRESHOLD (weak-vol sweeps earn no bonus).
 WEEKEND_MODE_ENABLED = False   # v10.1: skip weekends entirely until win-rate data justifies re-enabling
 WEEKEND_MIN_CONFLUENCE_SCORE = 6   # 1 above MIN_CONFLUENCE_SCORE — tighter on weekends
 
@@ -642,8 +645,8 @@ def is_active_session() -> bool:
     kill switch — when False, all Saturday/Sunday scans are suppressed regardless of
     UTC hour. Previously is_active_session() checked only the hour, so a Sunday at
     17:30 UTC would pass the NY-hours check and scan as if it were a weekday session.
-    When WEEKEND_MODE_ENABLED is True, weekend scans proceed but vol/confluence
-    thresholds are adjusted by get_volume_multiplier() and get_min_confluence_score().
+    When WEEKEND_MODE_ENABLED is True, weekend scans proceed but confluence
+    thresholds are adjusted by get_min_confluence_score() (vol gate removed v11.5).
     """
     if not SESSION_FILTER_ENABLED:
         return True
@@ -848,45 +851,6 @@ def calc_avg_volume(candles: list[dict], period: int = 20) -> float:
     vols = [c["v"] for c in candles[-period:] if c["v"] > 0]
     return sum(vols) / len(vols) if vols else 0.0
 
-
-def get_volume_multiplier() -> float:
-    """
-    Return the appropriate VOLUME_GATE_MULTIPLIER for the current UTC time.
-    Peak sessions (London, NY) use the strict 1.4× threshold.
-    Off-peak hours and weekends use relaxed thresholds to avoid suppressing all
-    sweeps during structurally valid but low-absolute-volume periods.
-    """
-    now     = datetime.now(timezone.utc)
-    weekday = now.weekday()   # 0=Mon … 4=Fri, 5=Sat, 6=Sun
-    hour    = now.hour
-    if weekday >= 5:                                     # Saturday or Sunday
-        return VOLUME_GATE_MULTIPLIER_OFFPEAK
-    if LONDON_OPEN_H <= hour < LONDON_CLOSE_H:           # 07:00–12:00 UTC
-        return VOLUME_GATE_MULTIPLIER_LONDON
-    if NY_OPEN_H <= hour < NY_CLOSE_H:                   # 13:00–20:00 UTC
-        return VOLUME_GATE_MULTIPLIER_NY
-    return VOLUME_GATE_MULTIPLIER_ASIA                   # all other weekday hours
-
-
-def sweep_has_volume_confirmation(candles: list[dict], sweep_bar_idx: int) -> bool:
-    """
-    Check that the sweep candle's volume exceeds the session-aware multiplier × 20-bar avg.
-    Uses get_volume_multiplier() to select the appropriate threshold for the current
-    UTC session (London/NY = 1.4×, Asia = 1.1×, weekends/off-peak = 1.0×).
-    sweep_bar_idx is the absolute index into candles.
-    """
-    if not VOLUME_GATE_ENABLED:
-        return True
-    if sweep_bar_idx < 20:
-        return True   # not enough history to judge — allow through
-    multiplier = get_volume_multiplier()
-    avg_vol    = calc_avg_volume(candles[:sweep_bar_idx], period=20)
-    sweep_vol  = candles[sweep_bar_idx]["v"]
-    confirmed  = sweep_vol >= avg_vol * multiplier
-    if not confirmed:
-        print(f"    [VOL GATE] sweep vol={sweep_vol:.2f} < "
-              f"{multiplier}× avg={avg_vol:.2f} — rejected")
-    return confirmed
 
 
 def is_swing_high(candles: list[dict], i: int, n: int) -> bool:
@@ -1258,9 +1222,8 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
     closed bars, not just the most recent one. This catches sweeps that closed 1-2
     bars ago and prevents missed signals.
 
-    Volume confirmation gate (High upgrade): the sweep candle's volume must be at
-    least VOLUME_GATE_MULTIPLIER × the 20-bar average volume. Low-volume wicks
-    into equal lows/highs are fake sweeps — we filter them out here.
+    Volume is no longer gated here (v11.5). It is scored as a +1/+2 bonus in
+    compute_smc_signal() based on VOLUME_BONUS_THRESHOLD / VOLUME_STRONG_THRESHOLD.
     """
     if len(candles_1h) < SWEEP_LOOKBACK + 2:
         return None
@@ -1281,9 +1244,6 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
         if direction == "long":
             for lvl in levels:
                 if bar["l"] < lvl and bar["c"] > lvl:
-                    # Volume gate
-                    if not sweep_has_volume_confirmation(candles_1h, bar_idx):
-                        continue
                     return {"level": lvl,
                             "wick_depth": lvl - bar["l"],
                             "direction": "long",
@@ -1292,8 +1252,6 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
         else:
             for lvl in levels:
                 if bar["h"] > lvl and bar["c"] < lvl:
-                    if not sweep_has_volume_confirmation(candles_1h, bar_idx):
-                        continue
                     return {"level": lvl,
                             "wick_height": bar["h"] - lvl,
                             "direction": "short",
@@ -1631,6 +1589,34 @@ def compute_smc_signal(symbol: str,
         score += ADX_BONUS_SCORE
         combos.append("ADX_TREND")
         details["adx_bonus"] = True
+
+    # ── Sweep Volume Bonus (v11.5) ───────────────────────────────────────────
+    # Replaces the hard gate in detect_liquidity_sweep(). Volume is now scored
+    # rather than gated — weak-vol sweeps still contribute to Combo B, but only
+    # confirmed-vol sweeps earn extra points.
+    #   ≥ VOLUME_STRONG_THRESHOLD (1.5×) → +2 institutional confirmation
+    #   ≥ VOLUME_BONUS_THRESHOLD  (1.2×) → +1 above-average volume
+    #   <  VOLUME_BONUS_THRESHOLD         → +0 (sweep counts, vol does not)
+    if has_sweep:
+        bar_idx   = sweep["sweep_bar"]
+        if bar_idx >= 20:
+            avg_vol   = calc_avg_volume(candles_1h[:bar_idx], period=20)
+            sweep_vol = candles_1h[bar_idx]["v"]
+            vol_ratio = sweep_vol / avg_vol if avg_vol > 0 else 0.0
+            details["sweep_vol_ratio"] = round(vol_ratio, 2)
+            if vol_ratio >= VOLUME_STRONG_THRESHOLD:
+                score += 2
+                combos.append("VOL_STRONG")
+                print(f"    [VOL BONUS+2] {symbol} sweep vol={sweep_vol:.2f} "
+                      f"({vol_ratio:.2f}× avg) — strong institutional confirmation")
+            elif vol_ratio >= VOLUME_BONUS_THRESHOLD:
+                score += 1
+                combos.append("VOL_CONFIRM")
+                print(f"    [VOL BONUS+1] {symbol} sweep vol={sweep_vol:.2f} "
+                      f"({vol_ratio:.2f}× avg) — above-average volume")
+            else:
+                print(f"    [VOL WEAK] {symbol} sweep vol={sweep_vol:.2f} "
+                      f"({vol_ratio:.2f}× avg) — below threshold, no bonus")
 
     # ── Gate (pre-Fib fast exit) ─────────────────────────────────────────────
     # BUG-05 fix: use a loose gate here (3) so clearly weak setups are skipped
@@ -2876,6 +2862,8 @@ def main() -> None:
     print(f"         Block sectors: {sorted(BTC_REGIME_BLOCK_SECTORS)}")
     print(f"         Exempt sectors: {sorted(BTC_REGIME_EXEMPT_SECTORS)}")
     print("  FIX-1: OI spike block → score penalty (-2), not hard block")
+    print("  NEW-7: Sweep vol gate → two-tier bonus (+1 ≥1.2× / +2 ≥1.5×)")
+    print("         Removes hard block; weak-vol sweeps still score via Combo B")
     print("  KEEP:  Volatility spike filter | Active signal tracking")
     print("         Win rate memory | FIB-rescue prevention | Heartbeat")
     print("  Timeframes: 1D+ADX / 4H / 1H / 15M")
