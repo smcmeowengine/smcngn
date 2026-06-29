@@ -48,7 +48,7 @@
       ],
       "message_id": 1147,
       "signal_grade": "A",
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782747047.230017
@@ -123,5 +123,5 @@
       "sent_at": 1782748853.719845
     }
   },
-  "last_scan_ts": 1782748831.7093186
+  "last_scan_ts": 1782749718.8545718
 }
