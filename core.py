@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.6"  # v11.5 + one-active-signal-per-symbol gate (blocks re-fires until SL/TP hit)
+VERSION = "11.7"  # v11.6 + fixed broken dedup override (was re-firing every scan, see is_duplicate())
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -1961,8 +1961,9 @@ def is_duplicate(sig: SMCSignal) -> bool:
     win, but is now only a secondary gate consulted after the active-signal
     check passes.
 
-    Does NOT mutate any global state — call replace_duplicate_signal()
-    separately if you intend to supersede it.
+    This is a hard gate: there is no override path. A symbol's active
+    signal must resolve (SL, TP1→SL, or TP2) before anything new can fire
+    for that symbol, regardless of how strong the new setup looks.
     """
     # ── Primary gate: any unresolved active signal for this symbol? ───────────
     # Check both directions so a new LONG can't fire while a SHORT is active
@@ -1993,20 +1994,6 @@ def is_duplicate(sig: SMCSignal) -> bool:
 
     return False
 
-
-def replace_duplicate_signal(sig: SMCSignal) -> None:
-    """
-    Remove the existing active/fired signal for this symbol (both directions)
-    so that `sig` can be tracked as the new authoritative signal.
-    Call only after confirming is_duplicate() returned True and the
-    new signal's confluence is higher.
-    """
-    for direction in ("long", "short"):
-        key = f"{sig.symbol}_{direction}"
-        _active_signals.pop(key, None)
-        _fired_signals.pop(key, None)
-    print(f"  [DUPLICATE] Replaced stale {sig.symbol} signal "
-          f"with new {sig.direction.upper()} confluence={sig.confluence}")
 
 def mark_fired(sig: SMCSignal) -> None:
     _fired_signals[f"{sig.symbol}_{sig.direction}"] = time.time()
@@ -2164,22 +2151,23 @@ def run_scan(all_mids: dict | None = None) -> None:
                 continue
 
             if is_duplicate(sig):
-                # Only replace if the new signal is strictly higher quality
-                # than whichever active signal is blocking (check both directions)
-                existing = {}
-                for d in ("long", "short"):
-                    candidate = _active_signals.get(f"{sig.symbol}_{d}", {})
-                    if candidate and not candidate.get("resolved", False):
-                        if candidate.get("confluence", 0) >= existing.get("confluence", 0):
-                            existing = candidate
-                if sig.confluence > existing.get("confluence", 0):
-                    replace_duplicate_signal(sig)   # explicit mutation
-                else:
-                    print(
-                        f"  [DUPLICATE] Keeping existing signal "
-                        f"(confluence {existing.get('confluence', 0)} >= new {sig.confluence})"
-                    )
-                    continue
+                # HARD LOCK (v11.7): one signal per symbol, no exceptions.
+                # Previously this block let a "higher confluence" new signal
+                # replace the active one via replace_duplicate_signal(). That
+                # comparison was silently broken — track_active_signal() never
+                # persisted the "confluence" field, so existing confluence
+                # always read back as 0 and the new signal (confluence >= 5
+                # just to pass the minimum gate) always looked "better." The
+                # active-signal lock was therefore wiped on almost every scan,
+                # which is exactly why ZECUSDT SHORT re-fired 15 minutes later
+                # with nearly identical levels. Per requirements, a symbol
+                # should only ever fire once until it resolves via SL, TP2,
+                # or TP1-then-SL — no override, regardless of confluence.
+                print(
+                    f"  [DUPLICATE] {sig.symbol} {sig.direction.upper()} blocked — "
+                    f"existing active signal must resolve first (confluence={sig.confluence})"
+                )
+                continue
             signals.append(sig)
             print(f"  ✅ {symbol} {sig.direction.upper()} | {sig.signal_grade} "
                   f"| {sig.confluence}/8 | {sig.combos_hit}")
