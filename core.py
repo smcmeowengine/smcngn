@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.7"  # v11.6 + fixed broken dedup override (was re-firing every scan, see is_duplicate())
+VERSION = "11.8"  # v11.7 + tighter TP1/TP2 for 15M timeframe + tighter entry proximity gate
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -136,12 +136,12 @@ BTC_REGIME_EXEMPT_SECTORS: set[str] = {
 
 # ── MINIMUM TP2 R:R GATE (Medium priority upgrade) ───────────────────────────
 # Drop signals whose TP2 reward-to-risk is below 1:3
-TP2_MIN_RR                = 2.5
+TP2_MIN_RR                = 2.0   # v11.8: lowered from 2.5 to match new TP2 cap of 2.5× (some headroom)
 
 # ── ENTRY ZONE PROXIMITY GATE ─────────────────────────────────────────────────
 # Drop signals where the entry zone midpoint is more than N× ATR_15m away from
 # current price. Zones too far away will almost never fill within the 2h expiry.
-ENTRY_ZONE_MAX_ATR_DISTANCE = 1.2   # tune up to loosen, down to tighten
+ENTRY_ZONE_MAX_ATR_DISTANCE = 0.7   # v11.8: tightened from 1.2 — only fire when entry zone is very close to price
 
 # ── OI / FUNDING FILTER (NEW — v9) ───────────────────────────────────────────
 # Fetch Hyperliquid perpetual metadata once per scan run and cache per symbol.
@@ -165,7 +165,7 @@ OI_SPIKE_BLOCK_PCT = 0.05           # 5% OI growth since last snapshot → -2 sc
 # whose entry zone top/bottom is more than this % away from current price.
 # Units differ from ENTRY_ZONE_MAX_ATR_DISTANCE above (% vs ATR multiples) —
 # both gates are applied at different stages; a signal must pass both.
-MAX_ENTRY_DIST_PCT = 1.2   # max % distance from current price to entry zone top/bottom
+MAX_ENTRY_DIST_PCT = 0.5   # v11.8: tightened from 1.2 — max % distance from price to entry; only near-miss entries fire
 
 # ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
@@ -1738,7 +1738,7 @@ def compute_smc_signal(symbol: str,
     # ── Take Profit (TP1 conservative, TP2 full target) ──────────────────────
     if direction == "long":
         risk      = exact_entry - stop_loss
-        tp1       = exact_entry + risk * 2.0     # 1:2 R:R minimum
+        tp1       = exact_entry + risk * 1.5     # v11.8: 1:1.5 R:R — reachable on 15M in a few hours (was 2.0)
         _lookback_4h = candles_4h[-40:]
         # Prefer the nearest confirmed swing high above current price.
         swing_highs_4h = [
@@ -1753,14 +1753,14 @@ def compute_smc_signal(symbol: str,
             highs_4h = [c["h"] for c in _lookback_4h if c["h"] > cur_p]
             tp2 = min(highs_4h) if highs_4h else exact_entry + risk * 4.0
         if tp2 < tp1:
-            tp2 = exact_entry + risk * 3.0
+            tp2 = exact_entry + risk * 2.5   # v11.8: fallback was 3.0, now 2.5
         # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
-        tp2_max = exact_entry + risk * 4.0
+        tp2_max = exact_entry + risk * 2.5   # v11.8: capped at 1:2.5 (was 4.0) — achievable intraday on 15M
         if tp2 > tp2_max:
             tp2 = tp2_max   # cap unreachable swing highs
     else:
         risk      = stop_loss - exact_entry
-        tp1       = exact_entry - risk * 2.0
+        tp1       = exact_entry - risk * 1.5   # v11.8: 1:1.5 R:R — reachable on 15M in a few hours (was 2.0)
         _lookback_4h = candles_4h[-40:]
         swing_lows_4h = [
             _lookback_4h[i]["l"]
@@ -1773,9 +1773,9 @@ def compute_smc_signal(symbol: str,
             lows_4h = [c["l"] for c in _lookback_4h if c["l"] < cur_p]
             tp2 = max(lows_4h) if lows_4h else exact_entry - risk * 4.0
         if tp2 > tp1:
-            tp2 = exact_entry - risk * 3.0
+            tp2 = exact_entry - risk * 2.5   # v11.8: fallback was 3.0, now 2.5
         # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
-        tp2_max = exact_entry - risk * 4.0
+        tp2_max = exact_entry - risk * 2.5   # v11.8: capped at 1:2.5 (was 4.0) — achievable intraday on 15M
         if tp2 < tp2_max:
             tp2 = tp2_max   # cap unreachable swing lows
 
@@ -2185,9 +2185,9 @@ def run_scan(all_mids: dict | None = None) -> None:
             continue
         rr_tp1  = abs(sig.take_profit_1 - sig.exact_entry) / risk
         rr_tp2  = abs(sig.take_profit_2 - sig.exact_entry) / risk
-        if rr_tp1 < 1.5:
+        if rr_tp1 < 1.3:   # v11.8: lowered from 1.5 — TP1 is now 1.5× risk so floor must be below it
             print(f"  [RR FILTER] {sig.symbol} {sig.direction.upper()} dropped "
-                  f"— TP1 RR={rr_tp1:.2f} < 1.5")
+                  f"— TP1 RR={rr_tp1:.2f} < 1.3")
             continue
         if rr_tp2 < TP2_MIN_RR:
             print(f"  [TP2 RR FILTER] {sig.symbol} {sig.direction.upper()} dropped "
