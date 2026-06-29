@@ -117,11 +117,11 @@
       ],
       "message_id": 1158,
       "signal_grade": "A",
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782748853.719845
     }
   },
-  "last_scan_ts": 1782751520.59644
+  "last_scan_ts": 1782752431.8974035
 }
