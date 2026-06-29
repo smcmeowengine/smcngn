@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.5"  # v11.4 + sweep vol gate → two-tier bonus (+1/+2); removes sweep_has_volume_confirmation()
+VERSION = "11.6"  # v11.5 + one-active-signal-per-symbol gate (blocks re-fires until SL/TP hit)
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -1949,35 +1949,64 @@ _last_scan_ts: float = 0.0   # last time run_scan() actually executed a scan (pe
 
 def is_duplicate(sig: SMCSignal) -> bool:
     """
-    Return True if an active, unresolved signal already exists for
-    (symbol, direction). Does NOT mutate any global state — call
-    replace_duplicate_signal() separately if you intend to supersede it.
+    Return True if ANY active, unresolved signal already exists for this
+    symbol (regardless of direction). Only one active signal per symbol is
+    allowed at a time — a new signal may only fire after the existing one
+    resolves via SL, TP1→SL, or TP2.
+
+    The per-direction cooldown (_fired_signals) is intentionally NOT used as
+    a standalone gate here: it expires in 4 hours but active signals can live
+    up to 48 hours, so relying on it caused re-fires while a trade was still
+    open. The cooldown is still written by mark_fired() and cleared on TP2
+    win, but is now only a secondary gate consulted after the active-signal
+    check passes.
+
+    Does NOT mutate any global state — call replace_duplicate_signal()
+    separately if you intend to supersede it.
     """
+    # ── Primary gate: any unresolved active signal for this symbol? ───────────
+    # Check both directions so a new LONG can't fire while a SHORT is active
+    # on the same symbol, and vice-versa.
+    for direction in ("long", "short"):
+        key = f"{sig.symbol}_{direction}"
+        active = _active_signals.get(key)
+        if active and not active.get("resolved", False):
+            age_s = time.time() - active.get("sent_at", 0)
+            if age_s < ACTIVE_SIGNAL_TTL_S:
+                print(f"  [DEDUP] {sig.symbol} blocked — "
+                      f"{direction.upper()} signal still active ({age_s/3600:.1f}h old, "
+                      f"waiting for SL/TP hit)")
+                return True
+
+    # ── Secondary gate: same-direction cooldown (post-resolution buffer) ──────
+    # This prevents immediately re-firing the same direction right after a
+    # resolution event (e.g. TP2 hit clears _active_signals but the cooldown
+    # provides a short settling window). The 4-hour window is intentionally
+    # shorter than ACTIVE_SIGNAL_TTL_S — it only guards the post-resolution gap.
     key = f"{sig.symbol}_{sig.direction}"
-    # Block if still an active unresolved signal within the TTL window
-    active = _active_signals.get(key)
-    if active and not active.get("resolved", False):
-        age_s = time.time() - active.get("sent_at", 0)
-        if age_s < ACTIVE_SIGNAL_TTL_S:
-            print(f"  [DEDUP] {key} blocked — trade still active ({age_s/3600:.1f}h old)")
-            return True
-    # Block if within the 4-hour cooldown window
     last = _fired_signals.get(key, 0)
-    return (time.time() - last) < SIGNAL_COOLDOWN_S
+    if (time.time() - last) < SIGNAL_COOLDOWN_S:
+        age_s = time.time() - last
+        print(f"  [DEDUP] {key} blocked — post-resolution cooldown "
+              f"({age_s/3600:.1f}h / {SIGNAL_COOLDOWN_S/3600:.0f}h)")
+        return True
+
+    return False
 
 
 def replace_duplicate_signal(sig: SMCSignal) -> None:
     """
-    Remove the existing active/fired signal for (symbol, direction)
+    Remove the existing active/fired signal for this symbol (both directions)
     so that `sig` can be tracked as the new authoritative signal.
     Call only after confirming is_duplicate() returned True and the
     new signal's confluence is higher.
     """
-    key = f"{sig.symbol}_{sig.direction}"
-    _active_signals.pop(key, None)
-    _fired_signals.pop(key, None)
-    print(f"  [DUPLICATE] Replaced stale {sig.symbol} {sig.direction} signal "
-          f"with new confluence {sig.confluence}")
+    for direction in ("long", "short"):
+        key = f"{sig.symbol}_{direction}"
+        _active_signals.pop(key, None)
+        _fired_signals.pop(key, None)
+    print(f"  [DUPLICATE] Replaced stale {sig.symbol} signal "
+          f"with new {sig.direction.upper()} confluence={sig.confluence}")
 
 def mark_fired(sig: SMCSignal) -> None:
     _fired_signals[f"{sig.symbol}_{sig.direction}"] = time.time()
@@ -2136,8 +2165,13 @@ def run_scan(all_mids: dict | None = None) -> None:
 
             if is_duplicate(sig):
                 # Only replace if the new signal is strictly higher quality
-                existing_key = f"{sig.symbol}_{sig.direction}"
-                existing = _active_signals.get(existing_key, {})
+                # than whichever active signal is blocking (check both directions)
+                existing = {}
+                for d in ("long", "short"):
+                    candidate = _active_signals.get(f"{sig.symbol}_{d}", {})
+                    if candidate and not candidate.get("resolved", False):
+                        if candidate.get("confluence", 0) >= existing.get("confluence", 0):
+                            existing = candidate
                 if sig.confluence > existing.get("confluence", 0):
                     replace_duplicate_signal(sig)   # explicit mutation
                 else:
@@ -2480,34 +2514,26 @@ def check_reactions(all_mids: dict) -> None:
             if now - s["sent_at"] > expiry_s:
                 print(f"  [REACT] {key} — entry expired (zone not touched in {expiry_s//3600}h), deleting message")
                 delete_message(msg_id)
+                record_outcome(s["symbol"], s.get("combos_hit", []), "expired")  # BUG-FIX: was missing, outcome never recorded
                 _fired_signals.pop(key, None)
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
 
-            # Phase 1: has price entered the entry zone yet?
-            # NOTE: We use exact_entry (the limit order price) to detect a fill.
-            # This is conservative — a wick that touches the zone top but not the exact
-            # limit price will not be counted as entered. This is preferable to the
-            # alternative: using zone bounds caused trades to be marked "entered" on the
-            # first scan after the signal, before the limit order could realistically fill,
-            # corrupting win-rate memory with phantom losses.
-            # Mid-price limitations still apply: intrabar wicks between scans are not
-            # detected. This is a known limitation documented in PERF-01.
-            entry_zone_low_s  = s.get("entry_zone_low",  exact_entry)
-            entry_zone_high_s = s.get("entry_zone_high", exact_entry)
+            # Phase 1: has price reached the limit order price yet?
+            # bar_low/bar_high == price (mid snapshot); wick-level fills between
+            # scans are a known limitation documented in PERF-01.
             if direction == "long":
-                in_zone       = price <= exact_entry          # price must reach the limit order price
+                in_zone       = price <= exact_entry   # limit buy fills when price drops to entry
                 past_sl       = bar_low  <= sl
-                tp1_pre_entry = bar_high >= tp1   # bar spiked to TP1 without entering zone
+                tp1_pre_entry = bar_high >= tp1        # price rallied past TP1 without filling
             else:
-                in_zone       = price >= exact_entry          # price must reach the limit order price
+                in_zone       = price >= exact_entry   # limit sell fills when price rises to entry
                 past_sl       = bar_high >= sl
-                tp1_pre_entry = bar_low  <= tp1   # bar dropped to TP1 without entering zone
+                tp1_pre_entry = bar_low  <= tp1        # price dropped past TP1 without filling
 
-            # Pre-entry SL: bar blew through zone AND past SL in same move.
-            # Resolves as "expired" — the entry was never filled so no capital
-            # was at risk; this is a structural non-event, not a loss or a miss.
+            # Pre-entry SL: blew through zone AND past SL in same move.
+            # Resolves as "expired" — entry was never filled, no capital at risk.
             if in_zone and past_sl:
                 print(f"  [REACT] {key} — SL hit before entry zone filled — resolving as expired ⏳")
                 react_to_message(msg_id, "⏳")
@@ -2517,8 +2543,7 @@ def check_reactions(all_mids: dict) -> None:
                 to_drop.append(key)
                 continue
 
-            # Pre-entry TP1/TP2: price moved in our favour but the limit order
-            # never filled — a genuine missed opportunity. Resolves as "missed".
+            # Pre-entry TP1: price moved in our favour but limit order never filled.
             elif tp1_pre_entry and not in_zone:
                 print(f"  [REACT] {key} — TP1 hit before entry zone filled — reacting 😢")
                 react_to_message(msg_id, "😢")
@@ -2553,18 +2578,19 @@ def check_reactions(all_mids: dict) -> None:
         # Priority: if both TP2 and SL are inside the same bar range,
         # we favour TP2 (price had to pass through TP2 to reach SL on the way back).
         if tp2_hit:
-            s["tp1_hit"] = True   # TP2 implies price passed through TP1 — keep internal bookkeeping consistent
+            s["tp1_hit"] = True   # TP2 implies price passed through TP1 — keep bookkeeping consistent
             react_to_message(msg_id, "🏆")   # full winner shows only 🏆, even if 🔥 was sent earlier
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
-            _fired_signals.pop(key, None)   # ← NEW: clear cooldown after full win; allow re-entry
+            _fired_signals.pop(key, None)   # clear cooldown on win; allow re-entry after resolution
             s["resolved"] = True
             to_drop.append(key)
 
         elif sl_hit and tp1_hit and not s["tp1_hit"]:
             # Both SL and TP1 touched in same bar — favour TP1 hit first
             # (price had to pass TP1 before reversing to SL)
-            react_to_message(msg_id, ["🔥", "😭"])   # both in one call — setMessageReaction replaces, doesn't append
+            react_to_message(msg_id, ["🔥", "😭"])   # setMessageReaction replaces, so send both at once
             record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
+            _fired_signals.pop(key, None)   # BUG-FIX: was missing — now clears cooldown on resolution
             s["resolved"] = True
             to_drop.append(key)
 
@@ -2574,7 +2600,8 @@ def check_reactions(all_mids: dict) -> None:
                 record_outcome(s["symbol"], s.get("combos_hit", []), "loss")
             else:
                 react_to_message(msg_id, "😭")
-                record_outcome(s["symbol"], s.get("combos_hit", []), "tp1_then_loss")  # BUG-23: distinct from clean tp1
+                record_outcome(s["symbol"], s.get("combos_hit", []), "tp1_then_loss")
+            _fired_signals.pop(key, None)   # BUG-FIX: was missing — now clears cooldown on resolution
             s["resolved"] = True
             to_drop.append(key)
 
