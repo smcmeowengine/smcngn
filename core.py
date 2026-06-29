@@ -1925,7 +1925,10 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"1D: <b>{bias_1d}</b>{adx_str}  |  4H: <b>{htf_bias}</b>  |  1H: <b>{bias_1h_str}</b>  |  {sig.timestamp}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{cur_price_line}"
-        f"\n<b>Entry:</b>      <code>{fmt_price(sig.exact_entry)}</code>  ({entry_src})\n"
+        f"\n<b>Entry Zone</b> ({entry_src})\n"
+        f"  High: <code>{fmt_price(sig.entry_zone_high)}</code>\n"
+        f"  Low:  <code>{fmt_price(sig.entry_zone_low)}</code>\n"
+        f"<b>Limit Entry:</b> <code>{fmt_price(sig.exact_entry)}</code>\n"
         f"\n<b>Stop Loss:</b>  <code>{fmt_price(sig.stop_loss)}</code>\n"
         f"<b>TP1:</b>        <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
@@ -2502,17 +2505,20 @@ def check_reactions(all_mids: dict) -> None:
                 past_sl       = bar_high >= sl
                 tp1_pre_entry = bar_low  <= tp1   # bar dropped to TP1 without entering zone
 
-            # Pre-entry SL: bar blew through zone AND past SL in same move
+            # Pre-entry SL: bar blew through zone AND past SL in same move.
+            # Resolves as "expired" — the entry was never filled so no capital
+            # was at risk; this is a structural non-event, not a loss or a miss.
             if in_zone and past_sl:
-                print(f"  [REACT] {key} — SL hit before entry zone filled — reacting 😢")
-                react_to_message(msg_id, "😢")
-                record_outcome(s["symbol"], s.get("combos_hit", []), "missed")
+                print(f"  [REACT] {key} — SL hit before entry zone filled — resolving as expired ⏳")
+                react_to_message(msg_id, "⏳")
+                record_outcome(s["symbol"], s.get("combos_hit", []), "expired")
                 _fired_signals.pop(key, None)
                 s["resolved"] = True
                 to_drop.append(key)
                 continue
 
-            # Pre-entry TP1: bar moved in our favour but zone was never touched
+            # Pre-entry TP1/TP2: price moved in our favour but the limit order
+            # never filled — a genuine missed opportunity. Resolves as "missed".
             elif tp1_pre_entry and not in_zone:
                 print(f"  [REACT] {key} — TP1 hit before entry zone filled — reacting 😢")
                 react_to_message(msg_id, "😢")
@@ -2604,7 +2610,7 @@ def check_reactions(all_mids: dict) -> None:
 #     "total":     {"wins": 8, "losses": 3, "tp1s": 2}
 #   }
 
-_win_rate_data: dict = {"by_symbol": {}, "by_combo": {}, "total": {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0}}
+_win_rate_data: dict = {"by_symbol": {}, "by_combo": {}, "total": {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0, "expired": 0}}
 _win_rate_dirty: bool = False   # PERF-06: deferred write flag
 
 
@@ -2633,13 +2639,14 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
              "tp1"          (TP1 hit, not TP2 — trade still running or closed at TP1)
              "tp1_then_loss" (TP1 hit, then SL hit on residual — BUG-23)
              "loss"         (SL hit after entry, TP1 never reached)
-             "missed"       (SL or TP1 hit before entry zone was ever filled — 😢)
+             "missed"       (TP1 hit before entry zone was ever filled — 😢)
+             "expired"      (SL hit before entry zone was filled — no capital at risk ⏳)
     """
     combo_key = "+".join(sorted(combos)) if combos else "unknown"
 
     for bucket, key in [("by_symbol", symbol), ("by_combo", combo_key)]:
         if key not in _win_rate_data[bucket]:
-            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0, "tp1_then_loss": 0}
+            _win_rate_data[bucket][key] = {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0, "tp1_then_loss": 0, "expired": 0}
         entry = _win_rate_data[bucket][key]
         if outcome == "win":
             entry["wins"] += 1
@@ -2653,6 +2660,9 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
         elif outcome == "missed":
             entry.setdefault("missed", 0)
             entry["missed"] += 1
+        elif outcome == "expired":
+            entry.setdefault("expired", 0)
+            entry["expired"] += 1
 
     t = _win_rate_data["total"]
     if outcome == "win":
@@ -2667,14 +2677,18 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     elif outcome == "missed":
         t.setdefault("missed", 0)
         t["missed"] += 1
+    elif outcome == "expired":
+        t.setdefault("expired", 0)
+        t["expired"] += 1
 
     total_trades = t["wins"] + t["losses"]
     wr = (t["wins"] / total_trades * 100) if total_trades else 0
-    missed = t.get("missed", 0)
-    tp1tl  = t.get("tp1_then_loss", 0)
+    missed  = t.get("missed", 0)
+    expired = t.get("expired", 0)
+    tp1tl   = t.get("tp1_then_loss", 0)
     print(f"  [WIN RATE] {symbol} → {outcome.upper()} | "
           f"Overall: {t['wins']}W / {t['losses']}L = {wr:.1f}% WR | "
-          f"Missed: {missed} | TP1→SL: {tp1tl}")
+          f"Missed: {missed} | Expired: {expired} | TP1→SL: {tp1tl}")
     global _win_rate_dirty
     _win_rate_dirty = True   # PERF-06: defer write to end of check_reactions()
 
@@ -2686,11 +2700,12 @@ def get_win_rate_summary() -> str:
     tp1s         = t.get("tp1s", 0)
     tp1tl        = t.get("tp1_then_loss", 0)   # BUG-23: show TP1→SL separately
     missed       = t.get("missed", 0)
+    expired      = t.get("expired", 0)
     total        = wins + losses
     if total == 0:
         return "No closed trades yet."
     wr = wins / total * 100
-    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s} | TP1→SL: {tp1tl} | 😢 Missed: {missed}"]
+    lines = [f"📊 Win rate: {wins}W / {losses}L ({wr:.1f}%) | TP1 partials: {tp1s} | TP1→SL: {tp1tl} | 😢 Missed: {missed} | ⏳ Expired: {expired}"]
     # Top 3 symbols by win rate (min 2 trades)
     by_sym = _win_rate_data.get("by_symbol", {})
     ranked = [(s, d) for s, d in by_sym.items() if d["wins"] + d["losses"] >= 2]
