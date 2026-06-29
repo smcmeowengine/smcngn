@@ -1,5 +1,5 @@
 """
-SMC Signal Engine v11.2
+SMC Signal Engine v11
 =============================================================
 Base: v10.1 (full runtime: active tracking, win-rate, state, reactions)
 Improvements from engine.py (Twilight v1.0):
@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.3"  # v11.2 + manual sector BTC regime filter, Combo B partial +2, OI spike → penalty
+VERSION = "11.4"  # v11.3 + fix details used before initialization (adx_1d write moved after dict creation)
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -1450,7 +1450,6 @@ def compute_smc_signal(symbol: str,
     if bias_1d != "neutral" and bias_1d != bias:
         print(f"  [NEAR MISS] {symbol} | killer=1D_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1D={bias_1d}")
         return None   # 4H and 1D disagree — skip
-    details["adx_1d"] = round(adx_1d, 1)
 
     # ── Step 1c: 1H Bias Alignment Filter ───────────────────────────────
     # If 1H trend is confirmed opposite to 4H direction, skip.
@@ -1481,8 +1480,8 @@ def compute_smc_signal(symbol: str,
 
     score = 0
     combos = ["HTF_BIAS"]
-    details: dict = {"htf_bias": bias, "bias_1d": bias_1d}
-    details["bias_1h"] = bias_1h
+    details: dict = {"htf_bias": bias, "bias_1d": bias_1d, "bias_1h": bias_1h}
+    details["adx_1d"] = round(adx_1d, 1)   # moved here — dict must exist before write
 
     # ── Step 2: 4H Order Block ───────────────────────────────────────────────
     obs_4h  = find_order_blocks(candles_4h, "4h", atr_4h, bias)
