@@ -1,6 +1,7 @@
 {
   "fired_signals": {
-    "AAVEUSDT_long": 1782733538.5293865
+    "AAVEUSDT_long": 1782733538.5293865,
+    "ZECUSDT_short": 1782738938.904679
   },
   "active_signals": {
     "AAVEUSDT_long": {
@@ -25,7 +26,30 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782733538.5293925
+    },
+    "ZECUSDT_short": {
+      "symbol": "ZECUSDT",
+      "direction": "short",
+      "exact_entry": 389.50821429,
+      "entry_zone_high": 390.6,
+      "entry_zone_low": 389.175,
+      "stop_loss": 431.5331428571429,
+      "take_profit_1": 305.4583571557143,
+      "take_profit_2": 263.4334285885714,
+      "combos_hit": [
+        "HTF_BIAS",
+        "A-weak",
+        "B-partial",
+        "VOL_STRONG",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 1135,
+      "signal_grade": "A+",
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782738938.9046848
     }
   },
-  "last_scan_ts": 1782738034.334531
+  "last_scan_ts": 1782738918.1718338
 }
