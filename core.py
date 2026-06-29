@@ -1,5 +1,5 @@
 """
-SMC Signal Engine v11 — MERGED BEST-OF
+SMC Signal Engine v11.1
 =============================================================
 Base: v10.1 (full runtime: active tracking, win-rate, state, reactions)
 Improvements from engine.py (Twilight v1.0):
@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.0"  # merged: v10.1 runtime + engine.py signal quality improvements
+VERSION = "11.1"  # v11.0 + correlation-aware BTC regime filter
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -109,6 +109,33 @@ BTC_REGIME_BLOCKS_SHORTS  = False
 BTC_SYMBOL                = "BTCUSDT"
 BTC_BEAR_EMA_FAST         = 21
 BTC_BEAR_EMA_SLOW         = 50
+
+# ── BTC CORRELATION FILTER (NEW — v11.1) ─────────────────────────────────────
+# Instead of a blanket regime block, measure each alt's rolling Pearson
+# correlation with BTC on 4H closes. Only correlated alts are blocked by
+# the regime; decoupled alts are evaluated on their own merit.
+#
+# Workflow:
+#   corr ≥ BTC_CORR_BLOCK_THRESHOLD  → apply regime block (same as v11.0)
+#   corr < BTC_CORR_BLOCK_THRESHOLD  → skip regime block (decoupled alt)
+#   corr < BTC_CORR_INVERSE_THRESHOLD → inverse correlation bonus (+1 score)
+#
+# BTC_HIGH_CORR_SECTORS lists sector names (from SECTOR_MAP) that are always
+# treated as fully correlated, skipping live computation for pairs that
+# have never meaningfully decoupled from BTC in practice.
+BTC_CORR_LOOKBACK           = 30    # 4H bars (~5 days of rolling window)
+BTC_CORR_BLOCK_THRESHOLD    = 0.70  # block regime filter when corr ≥ this
+BTC_CORR_INVERSE_THRESHOLD  = -0.30 # award inverse-correlation bonus when corr < this
+BTC_CORR_INVERSE_SCORE      = 1     # score points added for inverse correlation
+
+# Sectors assumed always-correlated with BTC — live computation is skipped
+# and correlation is treated as 1.0. Edit this set if a sector starts
+# consistently decoupling (e.g. remove "bnb" if BNB repeatedly diverges).
+BTC_HIGH_CORR_SECTORS: set[str] = {
+    "btc", "eth", "eth_l1", "bnb", "payments", "meme", "layer1_alt"
+}
+# Sectors that use LIVE correlation (may decouple or invert):
+#   "defi", "hype", "privacy"
 
 # ── MINIMUM TP2 R:R GATE (Medium priority upgrade) ───────────────────────────
 # Drop signals whose TP2 reward-to-risk is below 1:3
@@ -772,6 +799,124 @@ def btc_regime_blocks_short() -> bool:
     Returns False when the regime filter is disabled (get_btc_regime() returns
     REGIME_FILTER_DISABLED which does not equal "bull")."""
     return get_btc_regime() == "bull"
+
+
+# ── BTC Correlation helpers (NEW — v11.1) ────────────────────────────────────
+
+def calc_btc_correlation(alt_closes: list[float], btc_closes: list[float],
+                          n: int = BTC_CORR_LOOKBACK) -> float:
+    """
+    Pearson correlation between the last N 4H closes of an alt and BTC.
+    Returns a value in [-1, +1].
+
+    Safe defaults:
+      • Returns 1.0 (fully correlated) when there is insufficient data so that
+        the regime block is applied conservatively rather than being skipped.
+      • Returns 1.0 when both series are constant (zero variance) — a flat
+        market is not evidence of decorrelation.
+    """
+    if len(alt_closes) < n or len(btc_closes) < n:
+        return 1.0   # conservative: assume correlated on insufficient data
+    a = alt_closes[-n:]
+    b = btc_closes[-n:]
+    mean_a = sum(a) / n
+    mean_b = sum(b) / n
+    num    = sum((x - mean_a) * (y - mean_b) for x, y in zip(a, b))
+    den_a  = sum((x - mean_a) ** 2 for x in a) ** 0.5
+    den_b  = sum((y - mean_b) ** 2 for y in b) ** 0.5
+    if den_a == 0 or den_b == 0:
+        return 1.0   # flat series → treat as correlated
+    return num / (den_a * den_b)
+
+
+# Module-level BTC 4H closes cache — populated once per scan run
+# by _ensure_btc_closes() and reused by every symbol worker.
+_btc_4h_closes: list[float] = []
+
+
+def _ensure_btc_closes() -> None:
+    """
+    Populate _btc_4h_closes with the most recent N_4H 4H BTC closes.
+    Called once at the top of run_scan() before the parallel symbol loop.
+    Workers read from this list without locking; the list is written
+    only once per scan run (before workers start), so no race condition.
+    """
+    global _btc_4h_closes
+    try:
+        candles = get_candles_4h_cached(BTC_SYMBOL)
+        _btc_4h_closes = [c["c"] for c in candles]
+    except Exception as e:
+        print(f"  [CORR] Failed to fetch BTC 4H closes: {e}")
+        _btc_4h_closes = []
+
+
+def get_symbol_correlation(symbol: str, alt_4h_closes: list[float]) -> float:
+    """
+    Return the Pearson correlation of this symbol's 4H closes vs BTC.
+
+    Fast path: symbols in BTC_HIGH_CORR_SECTORS are always treated as 1.0
+    (saves the computation for pairs we know are tightly coupled).
+
+    Falls back to 1.0 (conservative) when BTC closes are unavailable.
+    """
+    sector = SECTOR_MAP.get(symbol, "")
+    if sector in BTC_HIGH_CORR_SECTORS:
+        return 1.0   # structurally correlated — skip live computation
+
+    if not _btc_4h_closes:
+        return 1.0   # BTC data unavailable — conservative default
+
+    corr = calc_btc_correlation(alt_4h_closes, _btc_4h_closes)
+    return corr
+
+
+def correlation_regime_decision(
+    symbol: str,
+    direction: str,
+    btc_regime: str,
+    corr: float,
+) -> tuple[bool, int]:
+    """
+    Given the BTC regime, signal direction, and live correlation, return:
+      (block: bool, score_delta: int)
+
+    block=True  → drop this signal (regime + correlation aligned against it)
+    block=False → allow signal to proceed
+    score_delta → points to add/subtract from confluence score:
+                  +BTC_CORR_INVERSE_SCORE when alt inverts BTC
+                   0 in all other cases
+
+    Rules
+    ─────
+    Bear regime + long direction:
+      corr ≥ threshold  → block  (alt moves with BTC, will dump too)
+      corr < threshold  → allow  (decoupled, evaluate on own merit)
+      corr < inverse    → allow + bonus (alt inverting BTC bear — extra conviction)
+
+    Bull regime + short direction (only when BTC_REGIME_BLOCKS_SHORTS=True):
+      same mirror logic applied to shorts.
+
+    Neutral regime or mismatched direction → never block, no bonus.
+    """
+    if not BTC_REGIME_FILTER_ENABLED:
+        return False, 0
+
+    score_delta = 0
+    block       = False
+
+    if btc_regime == "bear" and direction == "long":
+        if corr >= BTC_CORR_BLOCK_THRESHOLD:
+            block = True
+        elif corr < BTC_CORR_INVERSE_THRESHOLD:
+            score_delta = BTC_CORR_INVERSE_SCORE   # inverse correlation bonus
+
+    elif btc_regime == "bull" and direction == "short" and BTC_REGIME_BLOCKS_SHORTS:
+        if corr >= BTC_CORR_BLOCK_THRESHOLD:
+            block = True
+        elif corr < BTC_CORR_INVERSE_THRESHOLD:
+            score_delta = BTC_CORR_INVERSE_SCORE
+
+    return block, score_delta
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1801,16 +1946,17 @@ def format_signal_message(sig: SMCSignal) -> str:
 
     # Combo labels (no emojis)
     combo_labels = {
-        "HTF_BIAS":      "HTF Bias (4H)",
-        "4H_OB":         "4H Order Block",
-        "FVG":           "FVG (Combo 1)",
-        "LIQ_SWEEP":     "Liquidity Sweep (Combo 2)",
-        "15M_MSB":       "15M MSB Confirmed",
-        "15M_OB_FVG":    "15M OB/FVG Entry",
-        "FIB_GOLDEN":    "Fib Golden Zone 0.618–0.786",
-        "FIB_LEVEL":     f"Fib Level ({sig.details.get('fib_zone', '')})",
-        "OI_CONFIRM":    "OI declining (exit confirmed)",   # legacy — not scored in v10
-        "FUNDING_ALIGN": "Funding aligned (squeeze risk)",
+        "HTF_BIAS":          "HTF Bias (4H)",
+        "4H_OB":             "4H Order Block",
+        "FVG":               "FVG (Combo 1)",
+        "LIQ_SWEEP":         "Liquidity Sweep (Combo 2)",
+        "15M_MSB":           "15M MSB Confirmed",
+        "15M_OB_FVG":        "15M OB/FVG Entry",
+        "FIB_GOLDEN":        "Fib Golden Zone 0.618–0.786",
+        "FIB_LEVEL":         f"Fib Level ({sig.details.get('fib_zone', '')})",
+        "OI_CONFIRM":        "OI declining (exit confirmed)",   # legacy — not scored in v10
+        "FUNDING_ALIGN":     "Funding aligned (squeeze risk)",
+        "BTC_INVERSE_CORR":  "BTC inverse correlation ⚡",     # v11.1
     }
     combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
 
@@ -1849,6 +1995,19 @@ def format_signal_message(sig: SMCSignal) -> str:
     else:
         cur_price_line = ""
 
+    # Correlation section (v11.1): show BTC correlation when known
+    corr_section = ""
+    if "btc_corr" in sig.details:
+        corr_val = sig.details["btc_corr"]
+        if corr_val is None:
+            corr_section = "\n📡 <b>BTC Corr</b>: structural (assumed)"
+        else:
+            corr_section = f"\n📡 <b>BTC Corr (4H/30)</b>: <code>{corr_val:+.2f}</code>"
+            if corr_val < BTC_CORR_INVERSE_THRESHOLD:
+                corr_section += "  ⚡ inverse — bonus applied"
+            elif corr_val < BTC_CORR_BLOCK_THRESHOLD:
+                corr_section += "  ↔ decoupled"
+
     # Derivatives section (v9): show funding + OI when available
     deriv_section = ""
     if sig.funding_rate is not None or "oi_delta_pct" in sig.details:
@@ -1881,6 +2040,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP1:</b>        <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{corr_section}"
         f"{deriv_section}"
         f"{fib_section}"
         f"\n<i>SMC Signal Engine v{VERSION} | Min confluence {get_min_confluence_score()}/{max_score}</i>\n"
@@ -2038,12 +2198,15 @@ def run_scan(all_mids: dict | None = None) -> None:
 
 
     # ── BTC Regime (Medium priority upgrade) — fetch once for whole scan ─────
-    btc_bear  = btc_regime_blocks_long()
-    btc_bull  = btc_regime_blocks_short()   # IMP-03: block altcoin shorts in strong bull regime
-    if btc_bear:
-        print("  [BTC REGIME] Bear market detected — altcoin LONGS will be blocked.")
-    if btc_bull:
-        print("  [BTC REGIME] Bull market detected — altcoin SHORTS will be blocked.")
+    btc_regime = get_btc_regime()
+    if btc_regime == "bear":
+        print("  [BTC REGIME] Bear market detected — correlated altcoin LONGS will be blocked.")
+    elif btc_regime == "bull":
+        print("  [BTC REGIME] Bull market detected — correlated altcoin SHORTS will be blocked.")
+
+    # Pre-fetch BTC 4H closes for live correlation computation (v11.1).
+    # Workers read _btc_4h_closes without locking — populated before the pool starts.
+    _ensure_btc_closes()
 
     # PERF-05A: parallelize the per-symbol scan with a thread pool. Each
     # scan_symbol() call is I/O-bound (waiting on HL API responses), so
@@ -2072,21 +2235,48 @@ def run_scan(all_mids: dict | None = None) -> None:
     for symbol in WATCHLIST:
         sig = results.get(symbol)
         if sig:
-            # NEW-6: Clean BTC regime logic — no override exception (engine.py).
-            # Bear regime blocks altcoin longs, full stop. The A+ override in v10.1
-            # was a logical contradiction: if the regime says bear, taking longs is
-            # structurally wrong regardless of confluence.
-            if btc_bear and sig.direction == "long":
-                print(f"  [BTC REGIME] {symbol} LONG blocked — BTC bear regime")
+            # NEW-v11.1: Correlation-aware BTC regime filter.
+            # Compute live Pearson correlation between this alt's 4H closes and BTC.
+            # Alts in BTC_HIGH_CORR_SECTORS skip computation and are treated as
+            # fully correlated (corr=1.0). Decoupled alts (corr < threshold) bypass
+            # the regime block; inversely-correlated alts get a score bonus.
+            alt_4h_closes = [c["c"] for c in get_candles_4h_cached(symbol)]
+            corr = get_symbol_correlation(symbol, alt_4h_closes)
+            block, score_delta = correlation_regime_decision(
+                symbol, sig.direction, btc_regime, corr
+            )
+
+            sector = SECTOR_MAP.get(symbol, "")
+            corr_label = (
+                "structural" if sector in BTC_HIGH_CORR_SECTORS
+                else f"r={corr:.2f}"
+            )
+
+            # Store correlation in details for Telegram formatter (v11.1)
+            sig.details["btc_corr"] = (
+                None if sector in BTC_HIGH_CORR_SECTORS else corr
+            )
+
+            if block:
+                print(f"  [BTC REGIME] {symbol} {sig.direction.upper()} blocked "
+                      f"— regime={btc_regime} | {corr_label} ≥ {BTC_CORR_BLOCK_THRESHOLD}")
                 continue
-            # IMP-03 (retained): block altcoin shorts when BTC is in a strong bull regime.
-            # BTC_REGIME_BLOCKS_SHORTS=False means shorts are still evaluated on their own merit.
-            if btc_bull and sig.direction == "short":
-                if BTC_REGIME_BLOCKS_SHORTS:
-                    print(f"  [BTC REGIME] {symbol} SHORT blocked — BTC bull regime")
-                    continue
-                else:
-                    print(f"  [BTC REGIME] {symbol} SHORT allowed — BTC_REGIME_BLOCKS_SHORTS=False")
+
+            if score_delta > 0:
+                print(f"  [BTC CORR]  {symbol} {sig.direction.upper()} inverse-correlation bonus "
+                      f"+{score_delta} | {corr_label}")
+                sig.confluence += score_delta
+                sig.combos_hit.append("BTC_INVERSE_CORR")
+                # Re-grade after score adjustment
+                if sig.confluence >= APLUS_SIGNAL_SCORE:
+                    sig.signal_grade = "A+"
+                elif sig.confluence >= STRONG_SIGNAL_SCORE:
+                    sig.signal_grade = "A"
+
+            elif btc_regime in ("bear", "bull"):
+                # Allowed but note the decoupling in log
+                print(f"  [BTC CORR]  {symbol} {sig.direction.upper()} allowed "
+                      f"— decoupled | regime={btc_regime} | {corr_label} < {BTC_CORR_BLOCK_THRESHOLD}")
             if is_duplicate(sig):
                 # Only replace if the new signal is strictly higher quality
                 existing_key = f"{sig.symbol}_{sig.direction}"
@@ -2790,7 +2980,10 @@ def main() -> None:
     print("  NEW-3: ATR-relative Fib tolerance (scales with vol)")
     print("  NEW-4: FVG∩OB intersection entry zone (tighter entries)")
     print("  NEW-5: Combo-bundle scoring (A=3pts / B=3pts, no hodgepodge)")
-    print("  NEW-6: Clean BTC bear regime (no A+ override contradiction)")
+    print("  NEW-6: Correlation-aware BTC regime filter (v11.1)")
+    print(f"         Corr threshold={BTC_CORR_BLOCK_THRESHOLD} | "
+          f"Inverse bonus threshold={BTC_CORR_INVERSE_THRESHOLD} | "
+          f"Lookback={BTC_CORR_LOOKBACK} bars")
     print("  KEEP:  Volatility spike filter | Active signal tracking")
     print("         Win rate memory | FIB-rescue prevention | Heartbeat")
     print("  Timeframes: 1D+ADX / 4H / 1H / 15M")
