@@ -1,32 +1,9 @@
 {
   "fired_signals": {
-    "BTCUSDT_short": 1782732647.6937003,
-    "AAVEUSDT_long": 1782733538.5293865
+    "AAVEUSDT_long": 1782733538.5293865,
+    "BTCUSDT_short": 1782734452.6026824
   },
   "active_signals": {
-    "BTCUSDT_short": {
-      "symbol": "BTCUSDT",
-      "direction": "short",
-      "exact_entry": 60083.0,
-      "entry_zone_high": 60150.0,
-      "entry_zone_low": 60069.5,
-      "stop_loss": 61069.45714285714,
-      "take_profit_1": 58110.08571428571,
-      "take_profit_2": 57123.62857142857,
-      "combos_hit": [
-        "HTF_BIAS",
-        "A-weak",
-        "B-partial",
-        "ADX_TREND",
-        "FIB_GOLDEN"
-      ],
-      "message_id": 1122,
-      "signal_grade": "A",
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782732647.6937053
-    },
     "AAVEUSDT_long": {
       "symbol": "AAVEUSDT",
       "direction": "long",
@@ -49,7 +26,30 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782733538.5293925
+    },
+    "BTCUSDT_short": {
+      "symbol": "BTCUSDT",
+      "direction": "short",
+      "exact_entry": 60087.3,
+      "entry_zone_high": 60150.0,
+      "entry_zone_low": 60069.5,
+      "stop_loss": 60417.0,
+      "take_profit_1": 59427.90000000001,
+      "take_profit_2": 59098.20000000001,
+      "combos_hit": [
+        "HTF_BIAS",
+        "A-weak",
+        "B-partial",
+        "ADX_TREND",
+        "VOL_CONFIRM"
+      ],
+      "message_id": 1128,
+      "signal_grade": "A",
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782734452.602686
     }
   },
-  "last_scan_ts": 1782733517.6676984
+  "last_scan_ts": 1782734431.5222592
 }
