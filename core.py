@@ -33,7 +33,6 @@ Improvements from engine.py (Twilight v1.0):
   [KEEP]  Win rate memory — v10.1, retained.
   [KEEP]  FIB-rescue prevention (NON_FIB_MIN=4) — v10.1, retained.
   [KEEP]  Granular sector map from engine.py (payments / layer1_alt / privacy).
-  [KEEP]  Heartbeat on empty scan (send_no_signal_summary) — engine.py.
 
 Timeframes : 1D (macro bias + ADX) → 4H (bias) → 1H (zone refinement) → 15M (entry trigger)
 Exchange   : Hyperliquid (same API as original bot)
@@ -76,7 +75,7 @@ N_1D            = 60        # 60 daily candles (~2 months) — plenty for bias
 
 # ── SESSION FILTER (High priority upgrade) ────────────────────────────────────
 # Only trade during London (07:00–12:00 UTC) and New York (13:00–20:00 UTC)
-SESSION_FILTER_ENABLED = True
+SESSION_FILTER_ENABLED = False  # disabled: engine runs 24/7 every 15 min
 LONDON_OPEN_H  = 7
 LONDON_CLOSE_H = 12
 NY_OPEN_H      = 13
@@ -2163,8 +2162,6 @@ def run_scan(all_mids: dict | None = None) -> None:
 
     if not final:
         print("  [SCAN] No signals this round.")
-        # Heartbeat (engine.py): notify Telegram so the operator knows the bot is alive.
-        send_no_signal_summary()
         return
 
     # ── Fetch current prices (reuse from caller if provided, PERF-01) ─────────
@@ -2267,24 +2264,6 @@ def send_telegram_get_id(text: str) -> int | None:
             time.sleep(2)
     return None
 
-
-def send_no_signal_summary() -> None:
-    """
-    Send a brief heartbeat message when no signals pass all gates.
-    Ported from engine.py — lets the operator know the bot is alive and scanning
-    even when market conditions produce no actionable setups.
-    """
-    now = datetime.now(timezone.utc)
-    t   = _win_rate_data.get("total", {})
-    wins, losses = t.get("wins", 0), t.get("losses", 0)
-    total = wins + losses
-    wr_str = f" | WR: {wins}/{total} ({wins/total*100:.0f}%)" if total else ""
-    msg = (
-        f"🔍 <b>SMC Engine v{VERSION} — Scan Complete</b>\n"
-        f"No signals passed all gates this cycle.\n"
-        f"<i>{now:%Y-%m-%d %H:%M UTC}</i>{wr_str}"
-    )
-    send_telegram_get_id(msg)
 
 def react_to_message(message_id: int, emoji) -> bool:
     """
