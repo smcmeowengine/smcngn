@@ -1,33 +1,10 @@
 {
   "fired_signals": {
-    "ZECUSDT_short": 1782738938.904679,
     "ONDOUSDT_short": 1782745252.8320105,
-    "XLMUSDT_short": 1782745253.673852
+    "XLMUSDT_short": 1782745253.673852,
+    "ZECUSDT_short": 1782746140.0411186
   },
   "active_signals": {
-    "ZECUSDT_short": {
-      "symbol": "ZECUSDT",
-      "direction": "short",
-      "exact_entry": 389.50821429,
-      "entry_zone_high": 390.6,
-      "entry_zone_low": 389.175,
-      "stop_loss": 431.5331428571429,
-      "take_profit_1": 305.4583571557143,
-      "take_profit_2": 263.4334285885714,
-      "combos_hit": [
-        "HTF_BIAS",
-        "A-weak",
-        "B-partial",
-        "VOL_STRONG",
-        "FIB_GOLDEN"
-      ],
-      "message_id": 1135,
-      "signal_grade": "A+",
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782738938.9046848
-    },
     "ONDOUSDT_short": {
       "symbol": "ONDOUSDT",
       "direction": "short",
@@ -73,7 +50,30 @@
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782745253.6738563
+    },
+    "ZECUSDT_short": {
+      "symbol": "ZECUSDT",
+      "direction": "short",
+      "exact_entry": 389.6665,
+      "entry_zone_high": 390.6,
+      "entry_zone_low": 389.175,
+      "stop_loss": 431.5331428571429,
+      "take_profit_1": 305.9332142857142,
+      "take_profit_2": 264.0665714285713,
+      "combos_hit": [
+        "HTF_BIAS",
+        "A-weak",
+        "B-partial",
+        "VOL_CONFIRM",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 1145,
+      "signal_grade": "A",
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782746140.0411239
     }
   },
-  "last_scan_ts": 1782745231.9520643
+  "last_scan_ts": 1782746118.9142926
 }
