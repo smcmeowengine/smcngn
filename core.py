@@ -1,5 +1,5 @@
 """
-SMC Signal Engine v11.1
+SMC Signal Engine v11.2
 =============================================================
 Base: v10.1 (full runtime: active tracking, win-rate, state, reactions)
 Improvements from engine.py (Twilight v1.0):
@@ -55,7 +55,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "11.1"  # v11.0 + correlation-aware BTC regime filter
+VERSION = "11.2"  # v11.1 + three-tier ADX (block/pass/bonus) replaces binary gate
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -199,11 +199,21 @@ MSB_LOOKBACK       = 20
 MSB_SWING_BARS     = 3
 ATR_LEN            = 14
 
-# ── ADX TREND FILTER (NEW-1 from engine.py) ──────────────────────────────────
-# 1D ADX must be ≥ this value for the bias to be considered "trending".
-# Prevents signals in ranging/choppy markets where EMA alignment is unreliable.
+# ── ADX TREND FILTER (updated v11.2) ─────────────────────────────────────────
+# Three-tier model — replaces the binary ≥ 20 hard gate:
+#
+#   ADX < ADX_BLOCK_1D  → genuinely ranging → force neutral (still blocked)
+#   ADX_BLOCK_1D ≤ ADX < ADX_BONUS_1D → borderline → bias confirmed, no bonus
+#   ADX ≥ ADX_BONUS_1D → strong trend → bias confirmed + +1 score bonus
+#
+# Rationale: a hard cut at 20 eliminates XRP (19.5), BNB (18.9), LINK (18.4)
+# which have real EMA structure. ADX < 15 is genuinely choppy (TAO 11.5,
+# ZEC 13.0) and should still be blocked. ADX ≥ 25 is a clearly trending
+# market and earns a confluence bonus.
 ADX_PERIOD        = 14
-ADX_MIN_1D        = 20   # require ADX ≥ 20 on the daily timeframe
+ADX_BLOCK_1D      = 15   # below this → neutral (genuinely ranging)
+ADX_BONUS_1D      = 25   # at or above this → +1 score bonus (strong trend)
+ADX_BONUS_SCORE   = 1    # points awarded when ADX ≥ ADX_BONUS_1D
 
 # ── EMA SEPARATION FILTER ─────────────────────────────────────────────────────
 # Minimum gap between fast and slow EMAs (as a fraction of ATR) before bias
@@ -578,8 +588,8 @@ def calc_ema(values: list[float], period: int) -> list[float]:
 def calc_adx(candles: list[dict], period: int = ADX_PERIOD) -> float:
     """
     Wilder's ADX — returns the last ADX value (0–100).
-    NEW-1: used in daily_bias() to require ADX ≥ ADX_MIN_1D before accepting
-    a trending bias. Returns 0.0 when insufficient data.
+    NEW-1 (updated v11.2): used in daily_bias() with three-tier thresholds
+    (ADX_BLOCK_1D / ADX_BONUS_1D) instead of the old binary ADX_MIN_1D gate.
     """
     n = len(candles)
     if n < period * 2 + 1:
@@ -665,28 +675,31 @@ def is_active_session() -> bool:
 # 1D BIAS WITH ADX STRENGTH (NEW-1 — from engine.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_daily_bias_cache: dict = {}   # {symbol: {"bias": str, "ts": float}}
+_daily_bias_cache: dict = {}   # {symbol: {"bias": str, "adx": float, "ts": float}}
 _DAILY_BIAS_TTL_S = 60 * 60   # 1-hour TTL — daily candles don't change mid-scan
 
-def daily_bias(symbol: str) -> str:
+def daily_bias(symbol: str) -> tuple[str, float]:
     """
-    Return 'bull', 'bear', or 'neutral' for the daily timeframe.
+    Return (bias, adx_val) for the daily timeframe.
+    bias  : "bull" | "bear" | "neutral"
+    adx_val: raw ADX(14) value — caller uses this to award the ADX bonus point.
 
-    NEW-1: Requires BOTH:
-      1. EMA21 > EMA50 (bull) or EMA21 < EMA50 (bear) with directional momentum
-      2. ADX(14) ≥ ADX_MIN_1D (20) — market must be trending, not ranging
+    Three-tier ADX model (v11.2):
+      ADX < ADX_BLOCK_1D (15)          → neutral  (genuinely ranging — block)
+      ADX_BLOCK_1D ≤ ADX < ADX_BONUS_1D → bias confirmed, no bonus
+      ADX ≥ ADX_BONUS_1D (25)          → bias confirmed + caller awards +1
 
-    This is the single highest-impact improvement from engine.py: v10.1 uses
-    EMA-only bias and fires in choppy/ranging markets. Adding the ADX gate
-    eliminates those false signals while preserving all trending-market signals.
-
-    Falls back to 'neutral' if insufficient data or ADX threshold not met.
+    This replaces the binary ≥ 20 hard gate from v11.0/v11.1 which was
+    eliminating borderline-trending assets (ADX 15–20) that had real EMA
+    structure, while providing no extra signal for strongly trending ones.
     """
     now = time.time()
     cached = _daily_bias_cache.get(symbol)
     if cached and (now - cached["ts"]) < _DAILY_BIAS_TTL_S:
-        return cached["bias"]
+        return cached["bias"], cached["adx"]
 
+    result  = "neutral"
+    adx_val = 0.0
     try:
         candles_1d = get_candles_1d_cached(symbol)
         if len(candles_1d) < 55:
@@ -699,36 +712,49 @@ def daily_bias(symbol: str) -> str:
                 result = "neutral"
             else:
                 e21, e50 = ema21[-1], ema50[-1]
-                # EMA separation gate — avoids choppy/sideways bias
-                atr_1d  = calc_atr(candles_1d, ATR_LEN)
-                ema_sep = abs(e21 - e50)
+                atr_1d   = calc_atr(candles_1d, ATR_LEN)
+                ema_sep  = abs(e21 - e50)
                 if ema_sep < atr_1d * EMA_SEP_MIN_ATR:
                     result = "neutral"
                 elif (closes[-1] > e21 > e50 and
                       ema21[-1] > ema21[-3] and ema50[-1] > ema50[-3]):
-                    # ADX gate: only confirm bull bias when market is trending
                     adx_val = calc_adx(candles_1d, ADX_PERIOD)
-                    if adx_val >= ADX_MIN_1D:
-                        result = "bull"
-                    else:
-                        print(f"    [{symbol}] 1D bias BULL but ADX={adx_val:.1f} < {ADX_MIN_1D} — neutral")
+                    if adx_val < ADX_BLOCK_1D:
+                        print(f"    [{symbol}] 1D bias BULL but ADX={adx_val:.1f} "
+                              f"< {ADX_BLOCK_1D} (ranging) — neutral")
                         result = "neutral"
+                    else:
+                        result = "bull"
+                        if adx_val >= ADX_BONUS_1D:
+                            print(f"    [{symbol}] 1D bias BULL | ADX={adx_val:.1f} "
+                                  f"≥ {ADX_BONUS_1D} — strong trend bonus available")
+                        else:
+                            print(f"    [{symbol}] 1D bias BULL | ADX={adx_val:.1f} "
+                                  f"(borderline, no bonus)")
                 elif (closes[-1] < e21 < e50 and
                       ema21[-1] < ema21[-3] and ema50[-1] < ema50[-3]):
                     adx_val = calc_adx(candles_1d, ADX_PERIOD)
-                    if adx_val >= ADX_MIN_1D:
-                        result = "bear"
-                    else:
-                        print(f"    [{symbol}] 1D bias BEAR but ADX={adx_val:.1f} < {ADX_MIN_1D} — neutral")
+                    if adx_val < ADX_BLOCK_1D:
+                        print(f"    [{symbol}] 1D bias BEAR but ADX={adx_val:.1f} "
+                              f"< {ADX_BLOCK_1D} (ranging) — neutral")
                         result = "neutral"
+                    else:
+                        result = "bear"
+                        if adx_val >= ADX_BONUS_1D:
+                            print(f"    [{symbol}] 1D bias BEAR | ADX={adx_val:.1f} "
+                                  f"≥ {ADX_BONUS_1D} — strong trend bonus available")
+                        else:
+                            print(f"    [{symbol}] 1D bias BEAR | ADX={adx_val:.1f} "
+                                  f"(borderline, no bonus)")
                 else:
                     result = "neutral"
     except Exception as e:
         print(f"    [{symbol}] daily_bias error: {e}")
-        result = "neutral"
+        result  = "neutral"
+        adx_val = 0.0
 
-    _daily_bias_cache[symbol] = {"bias": result, "ts": now}
-    return result
+    _daily_bias_cache[symbol] = {"bias": result, "adx": adx_val, "ts": now}
+    return result, adx_val
 
 
 
@@ -1520,14 +1546,16 @@ def compute_smc_signal(symbol: str,
         return None
     direction = "long" if bias == "bull" else "short"
 
-    # ── Step 1b: 1D Bias Alignment Filter (ADX-gated via daily_bias) ───────────
-    # NEW-1: daily_bias() requires ADX ≥ ADX_MIN_1D in addition to EMA alignment.
-    # This prevents trading in ranging/choppy daily markets even when EMAs are
-    # aligned — the single highest-impact quality improvement from engine.py.
-    bias_1d = daily_bias(symbol)
+    # ── Step 1b: 1D Bias Alignment Filter (three-tier ADX) ──────────────────
+    # v11.2: daily_bias() now returns (bias, adx_val).
+    #   ADX < ADX_BLOCK_1D  → neutral (ranging — still blocks here)
+    #   ADX_BLOCK_1D–25     → bias confirmed, no bonus
+    #   ADX ≥ ADX_BONUS_1D  → bias confirmed + +1 score after combo scoring
+    bias_1d, adx_1d = daily_bias(symbol)
     if bias_1d != "neutral" and bias_1d != bias:
         print(f"  [NEAR MISS] {symbol} | killer=1D_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1D={bias_1d}")
         return None   # 4H and 1D disagree — skip
+    details["adx_1d"] = round(adx_1d, 1)
 
     # ── Step 1c: 1H Bias Alignment Filter ───────────────────────────────
     # If 1H trend is confirmed opposite to 4H direction, skip.
@@ -1671,6 +1699,7 @@ def compute_smc_signal(symbol: str,
     # Combo A: HTF OB (4H) + FVG (4H/1H) + 15M MSB   → full=+3, partial=+2/+1
     # Combo B: Liquidity Sweep + 15M OB + 15M FVG      → full=+3, partial=+1
     # Bonus:   Funding alignment                        → +1
+    # Bonus:   1D ADX ≥ ADX_BONUS_1D (25)              → +1  (v11.2)
 
     combo_a_hits = sum([has_4h_ob, has_fvg, has_msb])
     if combo_a_hits == 3:
@@ -1695,6 +1724,15 @@ def compute_smc_signal(symbol: str,
     if has_funding_align:
         score += 1
         combos.append("FUNDING_ALIGN")
+
+    # ADX trend strength bonus (v11.2)
+    # Awarded when 1D ADX ≥ ADX_BONUS_1D (25) — strong trend behind the setup.
+    # Does not fire when bias_1d is neutral (ADX was below ADX_BLOCK_1D).
+    has_adx_bonus = (bias_1d != "neutral" and adx_1d >= ADX_BONUS_1D)
+    if has_adx_bonus:
+        score += ADX_BONUS_SCORE
+        combos.append("ADX_TREND")
+        details["adx_bonus"] = True
 
     # ── Gate (pre-Fib fast exit) ─────────────────────────────────────────────
     # BUG-05 fix: use a loose gate here (3) so clearly weak setups are skipped
@@ -1957,6 +1995,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         "OI_CONFIRM":        "OI declining (exit confirmed)",   # legacy — not scored in v10
         "FUNDING_ALIGN":     "Funding aligned (squeeze risk)",
         "BTC_INVERSE_CORR":  "BTC inverse correlation ⚡",     # v11.1
+        "ADX_TREND":         f"1D ADX strong trend ({sig.details.get('adx_1d', '—')})",  # v11.2
     }
     combo_str = "\n".join("· " + combo_labels.get(c, c) for c in sig.combos_hit)
 
@@ -1981,6 +2020,8 @@ def format_signal_message(sig: SMCSignal) -> str:
     entry_src    = sig.details.get("entry_source", "Zone")
     htf_bias     = sig.details.get("htf_bias", "").upper()
     bias_1d      = sig.details.get("bias_1d", "neutral").upper()
+    adx_1d_val   = sig.details.get("adx_1d", None)
+    adx_str      = f" ADX={adx_1d_val}" if adx_1d_val is not None else ""
     bias_1h_str  = sig.details.get("bias_1h", "").upper()
     max_score    = 8
 
@@ -2028,7 +2069,7 @@ def format_signal_message(sig: SMCSignal) -> str:
 
     msg = (
         f"<b>{dir_marker} {sig.symbol} — {dir_label}</b>  |  Grade <b>{sig.signal_grade}</b>  |  {sig.confluence}/{max_score}\n"
-        f"1D: <b>{bias_1d}</b>  |  4H: <b>{htf_bias}</b>  |  1H: <b>{bias_1h_str}</b>  |  {sig.timestamp}\n"
+        f"1D: <b>{bias_1d}</b>{adx_str}  |  4H: <b>{htf_bias}</b>  |  1H: <b>{bias_1h_str}</b>  |  {sig.timestamp}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{cur_price_line}"
         f"\n<b>Entry Zone</b> ({entry_src})\n"
@@ -2975,7 +3016,8 @@ def main() -> None:
     print("  Combos: Bundle-scored A (OB+FVG+MSB) + B (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
-    print("  NEW-1: ADX≥20 on 1D bias (engine.py — most impactful)")
+    print("  NEW-1: ADX three-tier (block<15 / pass 15-25 / bonus≥25)")
+    print("         Replaces binary ≥20 gate — recovers XRP/BNB/LINK")
     print("  NEW-2: MSB body/range≥55% (no doji breaks)")
     print("  NEW-3: ATR-relative Fib tolerance (scales with vol)")
     print("  NEW-4: FVG∩OB intersection entry zone (tighter entries)")
