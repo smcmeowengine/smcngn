@@ -1,35 +1,11 @@
 {
   "fired_signals": {
-    "ONDOUSDT_short": 1782745252.8320105,
     "ZECUSDT_short": 1782747047.230011,
     "XLMUSDT_short": 1782747048.0373812,
     "BTCUSDT_short": 1782748852.755835,
     "BNBUSDT_short": 1782748853.7198403
   },
   "active_signals": {
-    "ONDOUSDT_short": {
-      "symbol": "ONDOUSDT",
-      "direction": "short",
-      "exact_entry": 0.314349,
-      "entry_zone_high": 0.31537,
-      "entry_zone_low": 0.31406,
-      "stop_loss": 0.32432157142857143,
-      "take_profit_1": 0.2944038571428571,
-      "take_profit_2": 0.28443128571428566,
-      "combos_hit": [
-        "HTF_BIAS",
-        "A-weak",
-        "B-partial",
-        "VOL_STRONG",
-        "FIB_LEVEL"
-      ],
-      "message_id": 1143,
-      "signal_grade": "A",
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782745252.8320167
-    },
     "ZECUSDT_short": {
       "symbol": "ZECUSDT",
       "direction": "short",
@@ -71,7 +47,7 @@
       ],
       "message_id": 1148,
       "signal_grade": "A",
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782747048.0373855
@@ -94,7 +70,7 @@
       ],
       "message_id": 1157,
       "signal_grade": "A",
-      "entered": false,
+      "entered": true,
       "tp1_hit": false,
       "resolved": false,
       "sent_at": 1782748852.7558405
@@ -123,5 +99,5 @@
       "sent_at": 1782748853.719845
     }
   },
-  "last_scan_ts": 1782752431.8974035
+  "last_scan_ts": 1782753320.4461434
 }
