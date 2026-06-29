@@ -1,32 +1,8 @@
 {
   "fired_signals": {
-    "AAVEUSDT_long": 1782733538.5293865,
     "ZECUSDT_short": 1782738938.904679
   },
   "active_signals": {
-    "AAVEUSDT_long": {
-      "symbol": "AAVEUSDT",
-      "direction": "long",
-      "exact_entry": 91.263,
-      "entry_zone_high": 91.3185,
-      "entry_zone_low": 91.097,
-      "stop_loss": 81.495788,
-      "take_profit_1": 110.797424,
-      "take_profit_2": 120.56463600000001,
-      "combos_hit": [
-        "HTF_BIAS",
-        "A-weak",
-        "B-partial",
-        "VOL_CONFIRM",
-        "FIB_LEVEL"
-      ],
-      "message_id": 1123,
-      "signal_grade": "A",
-      "entered": false,
-      "tp1_hit": false,
-      "resolved": false,
-      "sent_at": 1782733538.5293925
-    },
     "ZECUSDT_short": {
       "symbol": "ZECUSDT",
       "direction": "short",
@@ -51,5 +27,5 @@
       "sent_at": 1782738938.9046848
     }
   },
-  "last_scan_ts": 1782740718.659872
+  "last_scan_ts": 1782741631.872054
 }
