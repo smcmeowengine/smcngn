@@ -1,5 +1,31 @@
 {
-  "fired_signals": {},
-  "active_signals": {},
-  "last_scan_ts": 1782730830.6658385
+  "fired_signals": {
+    "BTCUSDT_short": 1782731738.9498844
+  },
+  "active_signals": {
+    "BTCUSDT_short": {
+      "symbol": "BTCUSDT",
+      "direction": "short",
+      "exact_entry": 60083.0,
+      "entry_zone_high": 60150.0,
+      "entry_zone_low": 60069.5,
+      "stop_loss": 61069.45714285714,
+      "take_profit_1": 58110.08571428571,
+      "take_profit_2": 57123.62857142857,
+      "combos_hit": [
+        "HTF_BIAS",
+        "A-weak",
+        "B-partial",
+        "ADX_TREND",
+        "FIB_GOLDEN"
+      ],
+      "message_id": 1121,
+      "signal_grade": "A",
+      "entered": false,
+      "tp1_hit": false,
+      "resolved": false,
+      "sent_at": 1782731738.9498904
+    }
+  },
+  "last_scan_ts": 1782731717.982087
 }
