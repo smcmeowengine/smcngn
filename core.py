@@ -1,8 +1,15 @@
 """
-SMC Signal Engine v11
+SMC Signal Engine
+=============================================================
+A multi-timeframe Smart Money Concepts (SMC) signal engine that scans a
+watchlist of perpetual futures for high-confluence long/short setups, using
+order blocks, fair value gaps, liquidity sweeps, market structure breaks,
+and Fibonacci confluence, combined with ADX trend strength, BTC regime
+filtering, and OI/funding analysis.
 
-Automated SMC (Smart Money Concepts) signal generator for Hyperliquid.
-Timeframes: 1D (Macro Bias) -> 4H (Bias) -> 1H (Zone Refinement) -> 15M (Entry Trigger)
+Timeframes : 1D (macro bias + ADX) → 4H (bias) → 1H (zone refinement) → 15M (entry trigger)
+Exchange   : Hyperliquid (same API as original bot)
+Alerts     : Telegram (HTML)
 """
 
 import os, time, math, threading, requests, random, json, pathlib, sys
@@ -39,7 +46,8 @@ N_1H            = 150
 N_4H            = 100
 N_1D            = 60        # 60 daily candles (~2 months) — plenty for bias
 
-# ── SESSION FILTER  ────────────────────────────────────
+# ── SESSION FILTER (High priority upgrade) ────────────────────────────────────
+# Only trade during London (07:00–12:00 UTC) and New York (13:00–20:00 UTC)
 SESSION_FILTER_ENABLED = False  # disabled: engine runs 24/7 every 15 min
 LONDON_OPEN_H  = 7
 LONDON_CLOSE_H = 12
@@ -50,11 +58,19 @@ NY_CLOSE_H     = 20
 DEAD_ZONE_START_H = 12
 DEAD_ZONE_END_H   = 13
 
-# ── VOLUME CONFIRMATION  ───────────────────────────────────────────────
+# ── VOLUME CONFIRMATION ─────────────────────────────────────────────────────
+# Volume is a scoring bonus rather than a hard gate inside detect_liquidity_sweep().
+# Low-volume sweeps are not blocked — they simply fail to earn the bonus,
+# and must rely on other confluence factors to reach MIN_CONFLUENCE_SCORE.
+#
+# Two-tier bonus (applied in compute_smc_signal() after sweep detection):
+#   sweep vol ≥ VOLUME_STRONG_THRESHOLD × avg  → +2 (institutional confirmation)
+#   sweep vol ≥ VOLUME_BONUS_THRESHOLD  × avg  → +1 (above-average, worth noting)
+#   sweep vol <  VOLUME_BONUS_THRESHOLD × avg  → +0 (sweep present, vol weak)
 VOLUME_BONUS_THRESHOLD  = 1.2   # minimum ratio for +1 sweep vol bonus
 VOLUME_STRONG_THRESHOLD = 1.5   # ratio for +2 strong institutional vol bonus
 
-# ── BTC REGIME FILTER  ───────────────────────────────
+# ── BTC REGIME FILTER (Medium priority upgrade) ───────────────────────────────
 # Block altcoin longs when BTC is in a confirmed bear regime
 BTC_REGIME_FILTER_ENABLED = True
 # Set to True to hard-block all altcoin shorts during a BTC bull regime.
@@ -65,7 +81,8 @@ BTC_SYMBOL                = "BTCUSDT"
 BTC_BEAR_EMA_FAST         = 21
 BTC_BEAR_EMA_SLOW         = 50
 
-# ── BTC REGIME SECTOR CLASSIFICATION  ─────────────────────────────────
+# Sectors in BTC_REGIME_BLOCK_SECTORS: BTC bear regime blocks altcoin longs.
+# Sectors in BTC_REGIME_EXEMPT_SECTORS: regime block is skipped entirely.
 BTC_REGIME_BLOCK_SECTORS: set[str] = {
     "btc", "eth", "eth_l1", "bnb", "payments", "meme", "layer1_alt", "privacy"
 }
@@ -74,7 +91,7 @@ BTC_REGIME_EXEMPT_SECTORS: set[str] = {
     "defi",   # protocol catalysts can override macro regime
 }
 
-# ── MINIMUM TP2 R:R GATE  ───────────────────────────
+# ── MINIMUM TP2 R:R GATE (Medium priority upgrade) ───────────────────────────
 # Drop signals whose TP2 reward-to-risk is below 1:3
 TP2_MIN_RR                = 2.0
 
@@ -83,7 +100,7 @@ TP2_MIN_RR                = 2.0
 # current price. Zones too far away will almost never fill within the 2h expiry.
 ENTRY_ZONE_MAX_ATR_DISTANCE = 0.7
 
-# ── OI / FUNDING FILTER  ───────────────────────────────────────────
+# ── OI / FUNDING FILTER (NEW — v9) ───────────────────────────────────────────
 # Fetch Hyperliquid perpetual metadata once per scan run and cache per symbol.
 OI_FUNDING_ENABLED = True
 
@@ -101,13 +118,21 @@ FUNDING_ALIGN_THRESHOLD = 0.0001    # 0.01%/8h — noticeable but not extreme
 OI_SPIKE_BLOCK_PCT = 0.05
 
 # ── ENTRY ZONE % DISTANCE GATE (run_scan) ─────────────────────────────────────
+# Second, independent proximity gate applied later in run_scan(): drop signals
+# whose entry zone top/bottom is more than this % away from current price.
+# Units differ from ENTRY_ZONE_MAX_ATR_DISTANCE above (% vs ATR multiples) —
+# both gates are applied at different stages; a signal must pass both.
 MAX_ENTRY_DIST_PCT = 0.5
 
-# ── MULTI-BAR SWEEP DETECTION  ──────────────────────
+# ── MULTI-BAR SWEEP DETECTION (Medium priority upgrade) ──────────────────────
 # Look back N bars for a sweep cluster, not just the last closed bar
 SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
 
-# ── WEEKEND MODE (v10) ────────────────────────────────────────────────────────
+# ── WEEKEND MODE ──────────────────────────────────────────────────────────────
+# On Saturday and Sunday, volume is structurally lower across all pairs.
+# Weekend mode raises MIN_CONFLUENCE_SCORE by 1 to compensate — fewer signals
+# but only the cleanest ones pass. Set to False to disable and use the same
+# thresholds 7 days a week.
 WEEKEND_MODE_ENABLED = False
 WEEKEND_MIN_CONFLUENCE_SCORE = 6   # 1 above MIN_CONFLUENCE_SCORE — tighter on weekends
 
@@ -127,7 +152,12 @@ MSB_LOOKBACK       = 20
 MSB_SWING_BARS     = 3
 ATR_LEN            = 14
 
-# ── ADX TREND FILTER (updated ) ─────────────────────────────────────────
+# ── ADX TREND FILTER ──────────────────────────────────────────────────────────
+# Three-tier model:
+#
+#   ADX < ADX_BLOCK_1D  → genuinely ranging → force neutral (still blocked)
+#   ADX_BLOCK_1D ≤ ADX < ADX_BONUS_1D → borderline → bias confirmed, no bonus
+#   ADX ≥ ADX_BONUS_1D → strong trend → bias confirmed + +1 score bonus
 ADX_PERIOD        = 14
 ADX_BLOCK_1D      = 15   # below this → neutral (genuinely ranging)
 ADX_BONUS_1D      = 25   # at or above this → +1 score bonus (strong trend)
@@ -139,13 +169,13 @@ ADX_BONUS_SCORE   = 1    # points awarded when ADX ≥ ADX_BONUS_1D
 # a documented constant for the 1D daily_bias() implementation.
 EMA_SEP_MIN_ATR   = 0.3  # EMAs < 0.3× ATR apart → choppy → neutral
 
-# ── MSB DISPLACEMENT BODY RATIO  ───────────────────────
 # Minimum body/range ratio for the MSB candle. Doji and spinning tops are
 # excluded — only true displacement candles (large body relative to range)
 # are accepted as valid market structure breaks.
 MSB_BODY_RATIO_MIN = 0.55  # body/range ≥ 55% required
 
-# ── ATR-RELATIVE FIB TOLERANCE  ────────────────────────
+# Replaces the fixed FIB_TOLERANCE_PCT. Tolerance = 0.5 × ATR_15m, so it
+# scales with volatility: tight on slow markets, wider on fast ones.
 FIB_TOLERANCE_ATR  = 0.5  # 0.5 × current ATR_15m
 
 # ── FIBONACCI CONFIG ─────────────────────────────────────────────────────────
@@ -156,7 +186,8 @@ FIB_GOLDEN_HIGH   = 0.786
 FIB_TOLERANCE_PCT = 0.005   # kept for legacy fallback; primary tolerance is FIB_TOLERANCE_ATR
 FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
-# ── GRANULAR SECTOR MAP  ─────────────────────────────────
+# ── SECTOR MAP ────────────────────────────────────────────────────────────────
+# Used by run_scan() sector cap logic (max 1 per sector per batch).
 SECTOR_MAP: dict[str, str] = {
     "BTCUSDT":    "btc",
     "ETHUSDT":    "eth",
@@ -173,14 +204,13 @@ SECTOR_MAP: dict[str, str] = {
 }
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
-# Max score is 8: 6 base factors + 1 Fib + 1 Funding align.
-# v10 recalibration: gate lowered to 4 to widen the funnel; A+ raised to 7
-# so only genuinely stacked setups earn the top grade. The downstream direction
-# cap (max 2 per side) and sector cap (max 1 per sector) act as the real
-# quality filter on the final batch — the confluence gate is a coarse pre-filter.
-MIN_CONFLUENCE_SCORE  = 5   # raised from 4: combo-bundle scoring produces higher raw scores (full A+B=6 before Fib)
+# Max score is 8: 6 base factors + 1 Fib + 1 Funding align. The downstream
+# direction cap (max 2 per side) and sector cap (max 1 per sector) act as the
+# real quality filter on the final batch — the confluence gate is a coarse
+# pre-filter.
+MIN_CONFLUENCE_SCORE  = 5
 STRONG_SIGNAL_SCORE   = 5   # A  grade — solid confirmation
-APLUS_SIGNAL_SCORE    = 7   # A+ grade — raised from 6; requires near-perfect stack
+APLUS_SIGNAL_SCORE    = 7   # A+ grade — requires near-perfect stack
 
 # ── INTERVAL MAP ─────────────────────────────────────────────────────────────
 INTERVAL_MS = {
@@ -209,7 +239,6 @@ _CANDLE_CACHE_TTL_S = 60 * 60         # 60-minute TTL (well within a 4H close)
 _candle_cache_1d: dict[str, dict] = {}
 _CANDLE_CACHE_1D_TTL_S = 60 * 60 * 4  # 4-hour TTL
 
-# ── 1H CANDLE CACHE () ────────────────────────────────────────────────
 # 1H candles are currently fetched fresh per symbol. Since the 1H bias doesn't
 # change between 15-minute scans, caching them within each scan run halves API
 # calls for multi-timeframe analysis (~25 fewer calls per scan).
@@ -228,11 +257,11 @@ _CANDLE_CACHE_1H_TTL_S = 60 * 15  # 15-minute TTL — aligns with scan interval
 # It is reset to None only on process restart (when _oi_funding_data is empty).
 _oi_funding_data: dict[str, dict] = {}
 
-# ── PER-RUN ATR CACHE () ───────────────────────────────────────────────
 # ATR is recomputed from scratch on every call and called 3× per symbol per
 # scan (4H, 1H, 15M). Cache by (symbol, timeframe) within each scan run.
 # Cleared at the top of run_scan() so results are never stale.
 _atr_cache: dict[str, float] = {}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATA STRUCTURES
@@ -286,6 +315,7 @@ class SMCSignal:
     oi_usd:          float | None = None   # open interest in USD at signal time (v9)
     timestamp:       str = ""
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # HYPERLIQUID API
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -334,8 +364,9 @@ def current_bar_open_ms(ref_ms: int, interval: str) -> int:
     return (ref_ms // INTERVAL_MS[interval]) * INTERVAL_MS[interval]
 
 def filter_valid_candles(candles: list[dict]) -> list[dict]:
-    """IMP-02: Remove flat/stale candles where h == l (zero True Range). These corrupt ATR."""
+    """Remove flat/stale candles where h == l (zero True Range); these corrupt ATR."""
     return [c for c in candles if c["h"] > c["l"]]
+
 
 def get_candles(symbol: str, interval: str, n: int) -> list[dict]:
     iv_ms    = INTERVAL_MS[interval]
@@ -355,6 +386,7 @@ def get_candles(symbol: str, interval: str, n: int) -> list[dict]:
     valid = [c for c in candles if c["t"] < end_ms][-n:]
     return filter_valid_candles(valid)
 
+
 def get_candles_4h_cached(symbol: str) -> list[dict]:
     """
     Return 4H candles from the in-memory cache when fresh (< 60 min old).
@@ -367,6 +399,7 @@ def get_candles_4h_cached(symbol: str) -> list[dict]:
     candles = get_candles(symbol, "4h", N_4H)
     _candle_cache[symbol] = {"candles": candles, "ts": time.time()}
     return candles
+
 
 def get_candles_1d_cached(symbol: str) -> list[dict]:
     """
@@ -381,6 +414,7 @@ def get_candles_1d_cached(symbol: str) -> list[dict]:
     _candle_cache_1d[symbol] = {"candles": candles, "ts": time.time()}
     return candles
 
+
 def get_candles_1h_cached(symbol: str) -> list[dict]:
     """
     Return 1H candles from the in-memory cache when fresh (< 15 min).
@@ -393,6 +427,7 @@ def get_candles_1h_cached(symbol: str) -> list[dict]:
     candles = get_candles(symbol, "1h", N_1H)
     _candle_cache_1h[symbol] = {"candles": candles, "ts": time.time()}
     return candles
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # OI / FUNDING  (v9)
@@ -446,6 +481,7 @@ def fetch_all_oi_funding() -> None:
     except Exception as e:
         print(f"  [OI/FUNDING] fetch_all_oi_funding error: {e}")
 
+
 def get_oi_funding(symbol: str) -> dict | None:
     """
     Return the cached OI/funding entry for `symbol`, or None if unavailable.
@@ -454,6 +490,7 @@ def get_oi_funding(symbol: str) -> dict | None:
     if not OI_FUNDING_ENABLED:
         return None
     return _oi_funding_data.get(hl_coin(symbol))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INDICATORS
@@ -469,11 +506,12 @@ def calc_atr(candles: list[dict], period: int = ATR_LEN) -> float:
     return sum(trs[-period:]) / period
 
 def calc_atr_cached(symbol: str, tf: str, candles: list, period: int = ATR_LEN) -> float:
-    """PERF-02: Memoized ATR. Returns cached value within the same scan run."""
+    """Memoized ATR. Returns cached value within the same scan run."""
     key = f"{symbol}:{tf}"
     if key not in _atr_cache:
         _atr_cache[key] = calc_atr(candles, period)
     return _atr_cache[key]
+
 
 def calc_ema(values: list[float], period: int) -> list[float]:
     if len(values) < period:
@@ -484,10 +522,11 @@ def calc_ema(values: list[float], period: int) -> list[float]:
         out.append(v * k + out[-1] * (1 - k))
     return out   # no zero-padding
 
+
 def calc_adx(candles: list[dict], period: int = ADX_PERIOD) -> float:
     """
     Wilder's ADX — returns the last ADX value (0–100).
-    (ADX_BLOCK_1D / ADX_BONUS_1D) instead of the old binary ADX_MIN_1D gate.
+    Used in daily_bias() with three-tier thresholds (ADX_BLOCK_1D / ADX_BONUS_1D).
     """
     n = len(candles)
     if n < period * 2 + 1:
@@ -531,6 +570,7 @@ def calc_adx(candles: list[dict], period: int = ADX_PERIOD) -> float:
     return sum(dx_list[-period:]) / period
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SESSION FILTER  (High priority upgrade)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def is_active_session() -> bool:
@@ -538,12 +578,11 @@ def is_active_session() -> bool:
     Return True if current UTC hour falls inside London or New York sessions.
     London : 07:00–12:00 UTC
     New York: 13:00–20:00 UTC
-    12:00–13:00 UTC dead zone is always excluded (not even emergency-bypassed).
+    The 12:00–13:00 UTC dead zone is always excluded (not even emergency-bypassed).
 
-    kill switch — when False, all Saturday/Sunday scans are suppressed regardless of
-    UTC hour. Previously is_active_session() checked only the hour, so a Sunday at
-    17:30 UTC would pass the NY-hours check and scan as if it were a weekday session.
-    When WEEKEND_MODE_ENABLED is True, weekend scans proceed but confluence
+    WEEKEND_MODE_ENABLED acts as a kill switch — when False, all Saturday/Sunday
+    scans are suppressed regardless of UTC hour. When True, weekend scans proceed
+    but confluence thresholds are adjusted by get_min_confluence_score().
     """
     if not SESSION_FILTER_ENABLED:
         return True
@@ -564,8 +603,8 @@ def is_active_session() -> bool:
     in_ny     = NY_OPEN_H     <= hour < NY_CLOSE_H
     return in_london or in_ny
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1D BIAS WITH ADX STRENGTH
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _daily_bias_cache: dict = {}   # {symbol: {"bias": str, "adx": float, "ts": float}}
@@ -577,12 +616,11 @@ def daily_bias(symbol: str) -> tuple[str, float]:
     bias  : "bull" | "bear" | "neutral"
     adx_val: raw ADX(14) value — caller uses this to award the ADX bonus point.
 
+    Three-tier ADX model:
       ADX < ADX_BLOCK_1D (15)          → neutral  (genuinely ranging — block)
       ADX_BLOCK_1D ≤ ADX < ADX_BONUS_1D → bias confirmed, no bonus
       ADX ≥ ADX_BONUS_1D (25)          → bias confirmed + caller awards +1
 
-    eliminating borderline-trending assets (ADX 15–20) that had real EMA
-    structure, while providing no extra signal for strongly trending ones.
     """
     now = time.time()
     cached = _daily_bias_cache.get(symbol)
@@ -647,6 +685,7 @@ def daily_bias(symbol: str) -> tuple[str, float]:
     _daily_bias_cache[symbol] = {"bias": result, "adx": adx_val, "ts": now}
     return result, adx_val
 
+
 _btc_regime_cache: dict = {}   # {"regime": "bull"|"bear"|"neutral", "ts": float}
 _BTC_REGIME_TTL_S = 60 * 30   # recheck every 30 minutes
 
@@ -657,6 +696,7 @@ _BTC_REGIME_TTL_S = 60 * 30   # recheck every 30 minutes
 # the get_btc_regime() return value for display or reporting when the filter is
 # disabled — check BTC_REGIME_FILTER_ENABLED first.
 REGIME_FILTER_DISABLED = "disabled"
+
 
 def get_btc_regime() -> str:
     """
@@ -699,7 +739,6 @@ def get_btc_regime() -> str:
         print(f"  [BTC REGIME ERROR] {e}")
         return "neutral"
 
-# ── BTC Regime Block helpers  ──────────
 
 def btc_regime_blocks_long(symbol: str) -> bool:
     """
@@ -714,6 +753,7 @@ def btc_regime_blocks_long(symbol: str) -> bool:
         return False
     return get_btc_regime() == "bear"
 
+
 def btc_regime_blocks_short(symbol: str) -> bool:
     """
     Return True when BTC is in a bull regime, BTC_REGIME_BLOCKS_SHORTS is True,
@@ -727,12 +767,15 @@ def btc_regime_blocks_short(symbol: str) -> bool:
         return False
     return get_btc_regime() == "bull"
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
+# VOLUME CONFIRMATION GATE  (High priority upgrade)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def calc_avg_volume(candles: list[dict], period: int = 20) -> float:
     vols = [c["v"] for c in candles[-period:] if c["v"] > 0]
     return sum(vols) / len(vols) if vols else 0.0
+
 
 def is_swing_high(candles: list[dict], i: int, n: int) -> bool:
     if i < n or i >= len(candles) - n:
@@ -747,6 +790,7 @@ def is_swing_low(candles: list[dict], i: int, n: int) -> bool:
     l = candles[i]["l"]
     return (all(candles[i-k]["l"] > l for k in range(1, n+1)) and
             all(candles[i+k]["l"] > l for k in range(1, n+1)))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FIBONACCI CONFLUENCE (Combo 3)
@@ -777,6 +821,7 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
 
     Golden zone (0.618–0.786) = highest probability.
 
+    The atr_15m parameter enables ATR-relative tolerance
     (FIB_TOLERANCE_ATR × atr_15m) instead of the fixed range-% tolerance.
     """
     n      = len(candles_4h)
@@ -847,14 +892,12 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
     nearest_level = 0.0
     nearest_dist  = float("inf")
 
-    # ATR-relative fib tolerance (engine.py).
     # FIB_TOLERANCE_ATR = 0.5 × ATR_15m auto-scales with volatility.
     # Tighter on slow markets, wider on fast ones. The ATR is passed in
     # from compute_smc_signal() via the atr_15m parameter.
     # Falls back to range-% tolerance if atr_15m is zero (safety guard).
     for name, lvl in key_levels.items():
         dist = abs(zone_mid - lvl)
-        # Primary: ATR-relative tolerance (); fallback: range-% (legacy)
         if atr_15m > 0:
             tol = FIB_TOLERANCE_ATR * atr_15m
         else:
@@ -907,6 +950,7 @@ def find_fib_confluence(candles_4h: list[dict], direction: str,
         direction=direction,
     )
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # COMBO 1 — HTF BIAS + ORDER BLOCK + FVG + MSB
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -922,7 +966,6 @@ def get_htf_bias(candles_4h: list[dict]) -> str:
         return "neutral"
     cur    = closes[-1]
     e21, e50 = ema21[-1], ema50[-1]
-    # FIX 6: require minimum EMA separation to avoid choppy/directionless markets
     ema_sep = abs(e21 - e50)
     atr_4h  = calc_atr(candles_4h, ATR_LEN)
     if ema_sep < atr_4h * 0.3:
@@ -951,9 +994,9 @@ def find_order_blocks(candles: list[dict], timeframe: str,
             move_up = max(candles[j]["h"] for j in range(i+1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n))) - cur["h"]
             if move_up >= atr * OB_MIN_MOVE_ATR:
                 if cur_price > cur["h"]:
-                    # FIX 4: bull OB uses lower half only (strongest demand)
                     zone_mid = (cur["h"] + cur["l"]) / 2
 
+                    # Mitigation check — if any subsequent candle closed below zone_mid,
                     # the demand at this OB was absorbed. Exclude mitigated OBs.
                     mitigated = any(
                         candles[j]["c"] < zone_mid
@@ -968,9 +1011,9 @@ def find_order_blocks(candles: list[dict], timeframe: str,
             move_dn = cur["l"] - min(candles[j]["l"] for j in range(i+1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n)))
             if move_dn >= atr * OB_MIN_MOVE_ATR:
                 if cur_price < cur["l"]:
-                    # FIX 4: bear OB uses upper half only (strongest supply)
                     zone_mid = (cur["h"] + cur["l"]) / 2
 
+                    # Mitigation check — if any subsequent candle closed above zone_mid,
                     # the supply at this OB was absorbed. Exclude mitigated OBs.
                     mitigated = any(
                         candles[j]["c"] > zone_mid
@@ -1003,23 +1046,15 @@ def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValue
 
 def detect_msb(candles: list[dict], direction: str) -> bool:
     """
-    v10: Single confirmed close breaking swing structure, with an ATR proximity check.
-    A doji or spinning top closing past a swing level is not a displacement move.
-    Rejects indecision candles regardless of whether they closed past structure.
+    A single confirmed close breaking swing structure, with an ATR proximity check:
+    the close must be within 0.5× ATR_15m of the swing threshold. This catches the
+    break early while still rejecting runaway candles (news spikes) where the body
+    has moved too far for the entry zone to still be reachable. Also requires
+    body/range ratio ≥ MSB_BODY_RATIO_MIN — a doji or spinning top closing past a
+    swing level is not a displacement move.
 
-    The two-bar requirement (v9) was filtering valid breaks correctly but entering
-    30 minutes late — by the time two 15M bars both closed beyond structure, the
-    entry zone was often already behind price.
-
-    v10 change: require ONE confirmed closed bar beyond the swing threshold, but
-    add an ATR distance gate — the close must be within 0.5× ATR_15m of the
-    threshold. This catches the break one bar earlier while still rejecting
-    runaway candles (news spikes) where the body has moved too far for the
-    entry zone to still be reachable.
-
-    ATR is computed inline from the last ATR_LEN bars to avoid a parameter
-    threading change. This is intentional — detect_msb() is a pure structural
-    function and should not carry external state.
+    ATR is computed inline from the last ATR_LEN bars since detect_msb() is a pure
+    structural function and should not carry external state.
     """
     n = len(candles)
     if n < MSB_LOOKBACK + MSB_SWING_BARS + 1:
@@ -1029,7 +1064,6 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
     cur_range = candles[-1]["h"] - candles[-1]["l"]
     cur_body  = abs(candles[-1]["c"] - candles[-1]["o"])
 
-    # body/range filter — rejects doji and spinning tops as MSB candles
     if cur_range > 0:
         body_ratio = cur_body / cur_range
         if body_ratio < MSB_BODY_RATIO_MIN:
@@ -1063,6 +1097,7 @@ def detect_msb(candles: list[dict], direction: str) -> bool:
         close_enough    = (threshold - cur_close) < atr_15m * 0.5
         return broke_structure and close_enough
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # COMBO 2 — LIQUIDITY SWEEP
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1089,6 +1124,7 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
     closed bars, not just the most recent one. This catches sweeps that closed 1-2
     bars ago and prevents missed signals.
 
+    Volume is not gated here; it is scored as a +1/+2 bonus in
     compute_smc_signal() based on VOLUME_BONUS_THRESHOLD / VOLUME_STRONG_THRESHOLD.
     """
     if len(candles_1h) < SWEEP_LOOKBACK + 2:
@@ -1125,6 +1161,7 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
                             "bars_ago": offset}
     return None
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # EXACT ENTRY PRICE LOGIC
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1143,6 +1180,7 @@ def get_entry_bias(symbol: str) -> str:
     if total >= 5 and missed / total > 0.30:
         return "aggressive"
     return "normal"
+
 
 def compute_exact_entry(direction: str,
                          entry_zone_high: float,
@@ -1205,6 +1243,7 @@ def compute_exact_entry(direction: str,
 
     return round(price, 8), reason
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # MASTER SIGNAL ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1221,6 +1260,7 @@ def get_min_confluence_score() -> int:
         if weekday >= 5:   # 5=Saturday, 6=Sunday
             return WEEKEND_MIN_CONFLUENCE_SCORE
     return MIN_CONFLUENCE_SCORE
+
 
 def compute_smc_signal(symbol: str,
                         candles_15m: list[dict],
@@ -1261,6 +1301,9 @@ def compute_smc_signal(symbol: str,
     direction = "long" if bias == "bull" else "short"
 
     # ── Step 1b: 1D Bias Alignment Filter (three-tier ADX) ──────────────────
+    #   ADX < ADX_BLOCK_1D  → neutral (ranging — still blocks here)
+    #   ADX_BLOCK_1D–25     → bias confirmed, no bonus
+    #   ADX ≥ ADX_BONUS_1D  → bias confirmed + +1 score after combo scoring
     bias_1d, adx_1d = daily_bias(symbol)
     if bias_1d != "neutral" and bias_1d != bias:
         print(f"  [NEAR MISS] {symbol} | killer=1D_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1D={bias_1d}")
@@ -1337,7 +1380,12 @@ def compute_smc_signal(symbol: str,
     if has_sweep:
         details["sweep"] = sweep
 
-    # ── Step 4b: OI Spike Block (v10) ───────────────────────────────────────
+    # ── Step 4b: OI Spike Block ───────────────────────────────────────────────
+    # When a liquidity sweep is detected, check whether OI is spiking.
+    # Rising OI is directionally ambiguous (new longs AND new shorts both raise OI),
+    # so a hard block based on raw OI delta was built on a flawed premise.
+    # A -2 penalty still suppresses weak setups while letting genuine A-grade
+    # setups survive. Revisit after 3–4 weeks of OI_SPIKE_WARN log data.
     if has_sweep and oi_data and OI_FUNDING_ENABLED:
         oi_now  = oi_data.get("open_interest", 0.0)
         oi_prev = oi_data.get("prev_oi")
@@ -1397,7 +1445,14 @@ def compute_smc_signal(symbol: str,
     if near_fvg_15m:
         details["15m_fvg"] = {"high": near_fvg_15m.gap_high, "low": near_fvg_15m.gap_low}
 
-    # ── Combo-Bundle Scoring (engine.py) ─────────────────────────────
+    # Scores are awarded per combo unit, not per individual indicator.
+    # This forces better-aligned setups and prevents a hodgepodge of unrelated
+    # factors from accumulating to the score threshold.
+    #
+    # Combo A: HTF OB (4H) + FVG (4H/1H) + 15M MSB   → full=+3, partial=+2/+1
+    # Combo B: Liquidity Sweep + 15M OB + 15M FVG      → full=+3, partial=+1
+    # Bonus:   Funding alignment                        → +1
+    # Bonus:   1D ADX ≥ ADX_BONUS_1D (25)              → +1
 
     combo_a_hits = sum([has_4h_ob, has_fvg, has_msb])
     if combo_a_hits == 3:
@@ -1423,13 +1478,22 @@ def compute_smc_signal(symbol: str,
         score += 1
         combos.append("FUNDING_ALIGN")
 
+    # ADX trend strength bonus
+    # Awarded when 1D ADX ≥ ADX_BONUS_1D (25) — strong trend behind the setup.
+    # Does not fire when bias_1d is neutral (ADX was below ADX_BLOCK_1D).
     has_adx_bonus = (bias_1d != "neutral" and adx_1d >= ADX_BONUS_1D)
     if has_adx_bonus:
         score += ADX_BONUS_SCORE
         combos.append("ADX_TREND")
         details["adx_bonus"] = True
 
-# ── Sweep Volume Bonus  ───────────────────────────────────────────
+    # ── Sweep Volume Bonus ───────────────────────────────────────────────────
+    # Replaces the hard gate in detect_liquidity_sweep(). Volume is now scored
+    # rather than gated — weak-vol sweeps still contribute to Combo B, but only
+    # confirmed-vol sweeps earn extra points.
+    #   ≥ VOLUME_STRONG_THRESHOLD (1.5×) → +2 institutional confirmation
+    #   ≥ VOLUME_BONUS_THRESHOLD  (1.2×) → +1 above-average volume
+    #   <  VOLUME_BONUS_THRESHOLD         → +0 (sweep counts, vol does not)
     if has_sweep:
         bar_idx   = sweep["sweep_bar"]
         if bar_idx >= 20:
@@ -1462,7 +1526,6 @@ def compute_smc_signal(symbol: str,
     if near_ob_15m:
         entry_high, entry_low = near_ob_15m.price_high, near_ob_15m.price_low
         entry_src = "15M OB"
-        # FVG-OB Intersection — refine zone to geometric overlap (engine.py)
         # If a FVG overlaps the OB, price must fill into both zones simultaneously.
         # Intersection is structurally tighter and reduces partial-zone entries.
         if near_fvg_15m:
@@ -1477,7 +1540,6 @@ def compute_smc_signal(symbol: str,
     elif near_fvg:
         entry_high, entry_low = near_fvg.gap_high, near_fvg.gap_low
         entry_src = f"{near_fvg.timeframe.upper()} FVG"
-        # also try to intersect 4H FVG with 4H OB if both exist
         if near_ob:
             overlap_h = min(entry_high, near_ob.price_high)
             overlap_l = max(entry_low,  near_ob.price_low)
@@ -1493,7 +1555,6 @@ def compute_smc_signal(symbol: str,
         return None
     details["entry_source"] = entry_src
 
-    # ── fix: guard against zero/flat ATR and zero-width or inverted
     # entry zones (e.g. stale candle data where h == l). Without this, a
     # zero-risk signal with TP1 == TP2 == exact_entry can slip through to
     # Telegram with garbage R:R values.
@@ -1505,7 +1566,6 @@ def compute_smc_signal(symbol: str,
         return None
 
     # ── Step 7: Fibonacci Confluence ─────────────────────────────────────────
-    # FIX 8: require at least 4 non-Fib factors before Fibonacci can add its bonus
     NON_FIB_MIN = 4   # require at least 4 real confluence factors before fib bonus
     if score < NON_FIB_MIN:
         fib = None   # fib cannot rescue a weak setup
@@ -1584,7 +1644,6 @@ def compute_smc_signal(symbol: str,
             tp2 = min(highs_4h) if highs_4h else exact_entry + risk * 4.0
         if tp2 < tp1:
             tp2 = exact_entry + risk * 2.5
-        # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
         tp2_max = exact_entry + risk * 2.5
         if tp2 > tp2_max:
             tp2 = tp2_max   # cap unreachable swing highs
@@ -1604,7 +1663,6 @@ def compute_smc_signal(symbol: str,
             tp2 = max(lows_4h) if lows_4h else exact_entry - risk * 4.0
         if tp2 > tp1:
             tp2 = exact_entry - risk * 2.5
-        # FIX 12: cap TP2 to a reachable distance (prevents 20–30% TP2 on thin altcoins)
         tp2_max = exact_entry - risk * 2.5
         if tp2 < tp2_max:
             tp2 = tp2_max   # cap unreachable swing lows
@@ -1671,6 +1729,7 @@ def compute_smc_signal(symbol: str,
         timestamp=ts,
     )
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # FORMATTING HELPERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1685,6 +1744,7 @@ def fmt_rr(entry: float, sl: float, tp: float, direction: str) -> str:
     reward = abs(tp - entry)
     rr     = reward / risk if risk > 0 else 0
     return f"1 : {rr:.1f}"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TELEGRAM ALERT
@@ -1704,7 +1764,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         "15M_OB_FVG":        "15M OB/FVG Entry",
         "FIB_GOLDEN":        "Fib Golden Zone 0.618–0.786",
         "FIB_LEVEL":         f"Fib Level ({sig.details.get('fib_zone', '')})",
-        "OI_CONFIRM":        "OI declining (exit confirmed)",   # legacy — not scored in v10
+        "OI_CONFIRM":        "OI declining (exit confirmed)",
         "FUNDING_ALIGN":     "Funding aligned (squeeze risk)",
         "BTC_INVERSE_CORR":  "BTC inverse correlation ⚡",
         "ADX_TREND":         f"1D ADX strong trend ({sig.details.get('adx_1d', '—')})",
@@ -1766,6 +1826,7 @@ def format_signal_message(sig: SMCSignal) -> str:
     )
     return msg
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEDUP
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1821,8 +1882,10 @@ def is_duplicate(sig: SMCSignal) -> bool:
 
     return False
 
+
 def mark_fired(sig: SMCSignal) -> None:
     _fired_signals[f"{sig.symbol}_{sig.direction}"] = time.time()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SCAN LOOP
@@ -1885,6 +1948,7 @@ SECTOR_GROUPS = {
 }
 MAX_PER_SECTOR = 1   # max signals from any one sector per scan
 
+
 def fetch_all_mids() -> dict[str, float]:
     """Fetch all mid prices in a single API call. Returns {coin: price}."""
     try:
@@ -1894,6 +1958,7 @@ def fetch_all_mids() -> dict[str, float]:
     except Exception as e:
         print(f"  [MIDS ERROR] {e}")
     return {}
+
 
 def run_scan(all_mids: dict | None = None) -> None:
     global _last_scan_ts, _atr_cache
@@ -1907,7 +1972,7 @@ def run_scan(all_mids: dict | None = None) -> None:
     print(f"\n[SCAN] {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} "
           f"— {len(WATCHLIST)} symbols")
 
-# ── Session Filter  ────────────────────────────────
+    # ── Session Filter (High priority upgrade) ────────────────────────────────
     hour = datetime.now(timezone.utc).hour
     if SESSION_FILTER_ENABLED and DEAD_ZONE_START_H <= hour < DEAD_ZONE_END_H:
         print(f"  [SESSION] Dead zone (UTC hour={hour}, {DEAD_ZONE_START_H}:00–{DEAD_ZONE_END_H}:00) — scan skipped unconditionally.")
@@ -1924,7 +1989,8 @@ def run_scan(all_mids: dict | None = None) -> None:
     # Mark scan time now that we've committed to actually scanning.
     _last_scan_ts = time.time()
 
-# ── BTC Regime  — fetch once for whole scan ─────
+
+    # ── BTC Regime (Medium priority upgrade) — fetch once for whole scan ─────
     btc_regime = get_btc_regime()
     if btc_regime == "bear":
         print("  [BTC REGIME] Bear market — block/exempt sectors applied to altcoin LONGS.")
@@ -1956,6 +2022,8 @@ def run_scan(all_mids: dict | None = None) -> None:
     for symbol in WATCHLIST:
         sig = results.get(symbol)
         if sig:
+            # btc_regime_blocks_long/short() now takes symbol and checks
+            # BTC_REGIME_BLOCK_SECTORS / BTC_REGIME_EXEMPT_SECTORS directly.
             if sig.direction == "long" and btc_regime_blocks_long(symbol):
                 print(f"  [BTC REGIME] {symbol} LONG blocked "
                       f"— bear regime | sector={SECTOR_MAP.get(symbol, 'unknown')}")
@@ -1966,6 +2034,18 @@ def run_scan(all_mids: dict | None = None) -> None:
                 continue
 
             if is_duplicate(sig):
+                # One signal per symbol, no exceptions.
+                # Previously this block let a "higher confluence" new signal
+                # replace the active one via replace_duplicate_signal(). That
+                # comparison was silently broken — track_active_signal() never
+                # persisted the "confluence" field, so existing confluence
+                # always read back as 0 and the new signal (confluence >= 5
+                # just to pass the minimum gate) always looked "better." The
+                # active-signal lock was therefore wiped on almost every scan,
+                # which is exactly why ZECUSDT SHORT re-fired 15 minutes later
+                # with nearly identical levels. Per requirements, a symbol
+                # should only ever fire once until it resolves via SL, TP2,
+                # or TP1-then-SL — no override, regardless of confluence.
                 print(
                     f"  [DUPLICATE] {sig.symbol} {sig.direction.upper()} blocked — "
                     f"existing active signal must resolve first (confluence={sig.confluence})"
@@ -2036,7 +2116,6 @@ def run_scan(all_mids: dict | None = None) -> None:
         print("  [SCAN] No signals this round.")
         return
 
-    # ── Fetch current prices (reuse from caller if provided, ) ─────────
     if all_mids is None:
         all_mids = fetch_all_mids()
 
@@ -2115,6 +2194,7 @@ def run_scan(all_mids: dict | None = None) -> None:
                   f"— NOT marking as fired (will retry next scan)")
         time.sleep(0.5)
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # TELEGRAM — send and return message_id
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2133,6 +2213,7 @@ def send_telegram_get_id(text: str) -> int | None:
                 print(f"[TG ERROR] {e}")
             time.sleep(2)
     return None
+
 
 def react_to_message(message_id: int, emoji) -> bool:
     """
@@ -2187,9 +2268,11 @@ def delete_message(message_id: int) -> bool:
         print(f"  [DELETE ERROR] msg {message_id}: {e}")
         return False
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ACTIVE SIGNAL TRACKING  (for reaction feature)
 # ═══════════════════════════════════════════════════════════════════════════════
+#
 # _active_signals stores signals that have been sent but not yet resolved.
 # Each entry:
 #   key   : "{symbol}_{direction}"
@@ -2201,6 +2284,7 @@ def delete_message(message_id: int) -> bool:
 #       "resolved": bool,      ← True once SL or TP2 reacted (final)
 #       "sent_at": float       ← Unix timestamp
 #   }
+#
 # Signals are removed from tracking after ACTIVE_SIGNAL_TTL_HOURS hours (default 48h).
 
 _active_signals: dict[str, dict] = {}
@@ -2209,6 +2293,7 @@ _active_signals: dict[str, dict] = {}
 ACTIVE_SIGNAL_TTL_HOURS = 48
 ACTIVE_SIGNAL_TTL_S     = ACTIVE_SIGNAL_TTL_HOURS * 3600  # 48 hours — perp setups rarely live longer
 ENTRY_EXPIRY_S          = 2 * 60 * 60         # 2 hours — if entry not hit, signal expires
+
 
 def track_active_signal(sig: SMCSignal, message_id: int) -> None:
     key = f"{sig.symbol}_{sig.direction}"
@@ -2223,23 +2308,25 @@ def track_active_signal(sig: SMCSignal, message_id: int) -> None:
         "take_profit_2":   sig.take_profit_2,
         "combos_hit":      sig.combos_hit,
         "message_id":      message_id,
-        "signal_grade":    sig.signal_grade,   # FIX 11: store grade for grade-aware expiry
+        "signal_grade":    sig.signal_grade,
         "entered":         False,
         "tp1_hit":         False,
         "resolved":        False,
         "sent_at":         time.time(),
     }
 
+
 def check_reactions(all_mids: dict) -> None:
     """
     For every active (unresolved) signal, check the current mid price against
     entry/TP/SL levels. Accepts the already-batched fetch_all_mids() result
-    from the caller () — eliminates N separate API calls (one per active
+    from the caller — eliminates N separate API calls (one per active
     signal). Wick-level fills between scans are not detected, only the price
     snapshot at the time this scan runs.
 
     Phase 1 — Waiting for entry zone touch:
       Entry requires price to actually reach exact_entry (the limit price),
+      not just the wider zone_high/zone_low boundary.
 
     Phase 2 — Trade active:
       🔥  TP1 hit
@@ -2358,7 +2445,7 @@ def check_reactions(all_mids: dict) -> None:
         # Priority: if both TP2 and SL are inside the same bar range,
         # we favour TP2 (price had to pass through TP2 to reach SL on the way back).
         if tp2_hit:
-            s["tp1_hit"] = True   # TP2 implies price passed through TP1 — keep bookkeeping consistent
+            s["tp1_hit"] = True
             react_to_message(msg_id, "🏆")   # full winner shows only 🏆, even if 🔥 was sent earlier
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
             _fired_signals.pop(key, None)   # clear cooldown on win; allow re-entry after resolution
@@ -2368,7 +2455,7 @@ def check_reactions(all_mids: dict) -> None:
         elif sl_hit and tp1_hit and not s["tp1_hit"]:
             # Both SL and TP1 touched in same bar — favour TP1 hit first
             # (price had to pass TP1 before reversing to SL)
-            react_to_message(msg_id, ["🔥", "😭"])
+            react_to_message(msg_id, ["🔥", "😭"])   # setMessageReaction replaces, so send both at once
             record_outcome(s["symbol"], s.get("combos_hit", []), "tp1")
             _fired_signals.pop(key, None)
             s["resolved"] = True
@@ -2401,10 +2488,14 @@ def check_reactions(all_mids: dict) -> None:
         save_win_rate()
         _win_rate_dirty = False
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
+# WIN RATE MEMORY  (Later upgrade — self-improving system)
 # ═══════════════════════════════════════════════════════════════════════════════
+#
 # Tracks outcomes per symbol and per combo set so the engine can surface which
 # setups have the highest historical win rate.  Stored in win_rate.json.
+#
 # Schema:
 #   {
 #     "by_symbol": { "BTCUSDT": {"wins": 3, "losses": 1, "tp1s": 2} },
@@ -2414,6 +2505,7 @@ def check_reactions(all_mids: dict) -> None:
 
 _win_rate_data: dict = {"by_symbol": {}, "by_combo": {}, "total": {"wins": 0, "losses": 0, "tp1s": 0, "missed": 0, "expired": 0}}
 _win_rate_dirty: bool = False
+
 
 def load_win_rate() -> None:
     global _win_rate_data
@@ -2426,16 +2518,19 @@ def load_win_rate() -> None:
         except Exception as e:
             print(f"  [WIN RATE] Load error: {e} — starting fresh")
 
+
 def save_win_rate() -> None:
     try:
         WIN_RATE_FILE.write_text(json.dumps(_win_rate_data, indent=2))
     except Exception as e:
         print(f"  [WIN RATE] Save error: {e}")
 
+
 def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     """
     outcome: "win"          (TP2 hit)
              "tp1"          (TP1 hit, not TP2 — trade still running or closed at TP1)
+             "tp1_then_loss" (TP1 hit, then SL hit on residual)
              "loss"         (SL hit after entry, TP1 never reached)
              "missed"       (TP1 hit before entry zone was ever filled — 😢)
              "expired"      (SL hit before entry zone was filled — no capital at risk ⏳)
@@ -2490,6 +2585,7 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     global _win_rate_dirty
     _win_rate_dirty = True
 
+
 def get_win_rate_summary() -> str:
     """Return a short human-readable win rate summary for Telegram."""
     t = _win_rate_data.get("total", {})
@@ -2514,11 +2610,13 @@ def get_win_rate_summary() -> str:
             lines.append(f"  {sym}: {d['wins']}/{n} ({d['wins']/n*100:.0f}%)")
     return "\n".join(lines)
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STATE PERSISTENCE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 STATE_FILE = pathlib.Path("state.json")
+
 
 def cleanup_state() -> None:
     """
@@ -2563,6 +2661,7 @@ def cleanup_state() -> None:
         print(f"  [CLEANUP] Nothing to clean "
               f"({len(_fired_signals)} cooldowns, {len(_active_signals)} active)")
 
+
 def load_state() -> None:
     global _fired_signals, _active_signals, _last_scan_ts
     if STATE_FILE.exists():
@@ -2585,9 +2684,9 @@ def load_state() -> None:
         _active_signals = {}
         _last_scan_ts   = 0.0
 
+
 def save_state() -> None:
     # Safety net: flush any dirty win-rate data before persisting other state.
-    # This guards against kill-between-reactions data loss (REMAINING-05).
     # save_win_rate() is idempotent — calling it twice in the same run is safe.
     if _win_rate_dirty:
         save_win_rate()
@@ -2603,7 +2702,7 @@ def save_state() -> None:
         tmp.write_text(state_json)
 
         if STATE_FILE.exists():
-            STATE_FILE.replace(STATE_FILE.with_suffix(".bak"))   # keep last known-good copy
+            STATE_FILE.replace(STATE_FILE.with_suffix(".bak"))
 
         os.replace(tmp, STATE_FILE)   # atomic on POSIX; near-atomic on Windows
 
@@ -2611,6 +2710,7 @@ def save_state() -> None:
               f"{len(_active_signals)} active signals")
     except Exception as e:
         print(f"  [STATE] Save error: {e}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN
@@ -2627,27 +2727,25 @@ def _shutdown_handler(signum, frame):
     save_state()
     sys.exit(0)
 
+
 def main() -> None:
     print("=" * 60)
     print(f"  SMC Signal Engine v{VERSION}  [single-scan mode]")
-    print("  MERGED: v10.1 runtime + engine.py signal quality")
     print("  Combos: Bundle-scored A (OB+FVG+MSB) + B (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
-    print("  NEW-1: ADX three-tier (block<15 / pass 15-25 / bonus≥25)")
-    print("         Replaces binary ≥20 gate — recovers XRP/BNB/LINK")
-    print("  NEW-2: MSB body/range≥55% (no doji breaks)")
-    print("  NEW-3: ATR-relative Fib tolerance (scales with vol)")
-    print("  NEW-4: FVG∩OB intersection entry zone (tighter entries)")
-    print("  NEW-5: Combo-bundle scoring (A=3pts / B-partial=+2 / B=3pts)")
-    print("  NEW-6: Manual sector BTC regime filter (v11.3)")
+    print("  ADX three-tier filter (block<15 / pass 15-25 / bonus≥25)")
+    print("  MSB body/range≥55% (no doji breaks)")
+    print("  ATR-relative Fib tolerance (scales with vol)")
+    print("  FVG∩OB intersection entry zone (tighter entries)")
+    print("  Combo-bundle scoring (A=3pts / B-partial=+2 / B=3pts)")
+    print("  Manual sector BTC regime filter")
     print(f"         Block sectors: {sorted(BTC_REGIME_BLOCK_SECTORS)}")
     print(f"         Exempt sectors: {sorted(BTC_REGIME_EXEMPT_SECTORS)}")
-    print("  FIX-1: OI spike block → score penalty (-2), not hard block")
-    print("  NEW-7: Sweep vol gate → two-tier bonus (+1 ≥1.2× / +2 ≥1.5×)")
-    print("         Removes hard block; weak-vol sweeps still score via Combo B")
-    print("  KEEP:  Volatility spike filter | Active signal tracking")
-    print("         Win rate memory | FIB-rescue prevention | Heartbeat")
+    print("  OI spike block → score penalty (-2), not hard block")
+    print("  Sweep vol gate → two-tier bonus (+1 ≥1.2× / +2 ≥1.5×)")
+    print("  Volatility spike filter | Active signal tracking")
+    print("  Win rate memory | FIB-rescue prevention | Heartbeat")
     print("  Timeframes: 1D+ADX / 4H / 1H / 15M")
     print("=" * 60)
 
@@ -2683,6 +2781,7 @@ def main() -> None:
     cleanup_state()
     save_state()
     print("  [DONE] Scan complete. Exiting.")
+
 
 if __name__ == "__main__":
     main()
