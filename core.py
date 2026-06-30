@@ -262,7 +262,19 @@ DISCOUNT_THRESHOLD = 0.40   # close <= 40% of 4H range = discount
 # floor is high. Thresholds are set accordingly to keep the bar meaningful.
 MIN_CONFLUENCE_SCORE  = 6
 STRONG_SIGNAL_SCORE   = 6   # A  grade — solid confirmation
-APLUS_SIGNAL_SCORE    = 8   # A+ grade — requires near-perfect stack
+APLUS_SIGNAL_SCORE    = 8   # A+ grade — requires near-perfect stack — a GRADING
+                            # threshold only. Do NOT reuse this as the displayed
+                            # score denominator (see THEORETICAL_MAX_SCORE below);
+                            # plenty of legitimate signals score above this.
+
+# Sum of every individual bonus a single signal can realistically stack:
+#   PD_ALIGN(1) + Combo A(3) + Combo B(3) + IFVG_ALIGN(1) + FUNDING_ALIGN(1)
+#   + ADX_TREND(1) + FIB_GOLDEN(2) + VOL_STRONG(2) + LIQ_POOL_VERY_STRONG(2)
+#   + MSS_CONFIRMED(2)
+# Used only as the "/N" denominator in Telegram messages so the displayed
+# ratio can never read as a malformed "11/8" once IFVG/structure/pool bonuses
+# are firing together. Recompute this if a new bonus source is ever added.
+THEORETICAL_MAX_SCORE = 1 + 3 + 3 + 1 + 1 + 1 + 2 + 2 + 2 + 2   # = 18
 
 # ── INTERVAL MAP ─────────────────────────────────────────────────────────────
 INTERVAL_MS = {
@@ -1619,18 +1631,21 @@ def compute_smc_signal(symbol: str,
       - A valid entry zone (OB and/or FVG) must exist — never fabricated
       - Entry zone must not overlap an opposing, active IFVG
 
-    Scoring (on top of the gates above, max ~10):
+    Scoring (on top of the gates above, max = THEORETICAL_MAX_SCORE, currently 18):
       +1  PD alignment (buying discount / selling premium, not just non-opposed)
-      +1  4H Order Block (approaching zone)
-      +1  4H or 1H Fair Value Gap
+      +1/+2/+3  Combo A: 4H Order Block + 4H/1H FVG + 15M MSB (full/partial/weak)
+      +1/+2/+3  Combo B: Liquidity Sweep + 15M OB + 15M FVG (full/partial)
       +1  Aligned, active Inverse FVG (IFVG) support/resistance
-      +1  15M OB / FVG (precision entry layer)
+      +1  CHoCH confirmed / +2 MSS confirmed (market structure shift)
+      +1/+2  Liquidity pool strength on the swept level (strong / very strong)
       +1  Fibonacci confluence (0.382 / 0.5 / 0.618 / 0.786)
               → +2 if in golden zone (0.618–0.786)  [upgrades score by 2, not 1]
       +1  Funding alignment (shorts/longs overpaying against signal direction)
       +1/+2 Sweep volume confirmation
       +1  1D ADX strong-trend bonus
       OI spike: -2 penalty (not a hard block) if OI grew >5% during the sweep
+      -1  per partial-state OB used in the final signal
+      -1  per ≥50%-mitigated FVG used in the final signal
 
     Order Block / FVG quality (lifecycle-aware, not binary):
       Order Blocks carry a state — fresh / partial / full / invalidated —
@@ -2056,10 +2071,17 @@ def compute_smc_signal(symbol: str,
     # ── Step 6b: Opposing IFVG Entry Block (hard gate) ──────────────────────
     # Never enter directly into an opposing, still-active IFVG — it is live
     # institutional resistance/support sitting on top of the entry zone.
+    # "Still-active" means anything find_inverse_fvgs() didn't already drop as
+    # "invalidated" — fresh, partial, AND full all count. A "full" IFVG has
+    # been retested heavily but, by definition, has NOT been closed through
+    # (a close through the zone makes _track_ob_lifecycle return
+    # "invalidated", and those are filtered out upstream already). A
+    # heavily-retested-but-unbroken zone is if anything the most proven
+    # S/R level, so it must never be exempted from this gate.
     opposing_dir = "bear" if direction == "long" else "bull"
     buffer_15m   = atr_15m * IFVG_BLOCK_BUFFER_ATR
     for g in all_ifvgs:
-        if g.direction != opposing_dir or g.state == "full":
+        if g.direction != opposing_dir:
             continue
         if (g.gap_low - buffer_15m) <= entry_high and (g.gap_high + buffer_15m) >= entry_low:
             print(f"  [GATE] {symbol} {direction.upper()} rejected — entry zone overlaps "
@@ -2278,7 +2300,7 @@ def format_signal_message(sig: SMCSignal) -> str:
     adx_1d_val   = sig.details.get("adx_1d", None)
     adx_str      = f" ADX={adx_1d_val}" if adx_1d_val is not None else ""
     bias_1h_str  = sig.details.get("bias_1h", "").upper()
-    max_score    = 8
+    max_score    = THEORETICAL_MAX_SCORE
 
     rr1 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_1, sig.direction)
     rr2 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_2, sig.direction)
