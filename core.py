@@ -1,5 +1,5 @@
 """
-SMC Signal Engine
+Vectis Liquidity Engine
 =============================================================
 A multi-timeframe Smart Money Concepts (SMC) signal engine that scans a
 watchlist of perpetual futures for high-confluence long/short setups, using
@@ -7,18 +7,13 @@ order blocks, fair value gaps, liquidity sweeps, market structure breaks,
 premium/discount filtering, and Fibonacci confluence, combined with ADX
 trend strength, BTC regime filtering, and OI/funding analysis.
 
-This is a merge of two prior engines:
-  - v11.8 production infra: BTC regime filter, weekend-mode thresholds,
-    win-rate tracking + adaptive entry bias, OI/funding scoring, Fibonacci
-    golden-zone confluence, Telegram reaction-based outcome tracking.
-  - v1 "built from scratch" discipline: liquidity sweep, 15M displacement/
-    structure-shift confirmation, and premium/discount zone are now HARD
-    GATES (mandatory) rather than optional scoring bonuses, on the
-    principle that a setup missing genuine institutional confirmation
-    should never reach the Telegram channel regardless of how many other
-    points it accumulates. This trades signal *frequency* for signal
-    *quality* — fewer, more convicted setups, in line with what actually
-    correlates with win rate in SMC strategies.
+Liquidity sweep, 15M displacement/structure-shift confirmation, and
+premium/discount zone are HARD GATES (mandatory) rather than optional
+scoring bonuses, on the principle that a setup missing genuine
+institutional confirmation should never reach the Telegram channel
+regardless of how many other points it accumulates. This trades signal
+*frequency* for signal *quality* — fewer, more convicted setups, in line
+with what actually correlates with win rate in SMC strategies.
 
 Timeframes : 1D (macro bias + ADX) → 4H (bias + premium/discount) →
              1H (liquidity sweep) → 15M (displacement + MSB entry trigger)
@@ -42,7 +37,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "12.0-merged"
+VERSION = "1.0.0"
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -114,7 +109,7 @@ TP2_MIN_RR                = 2.0
 # current price. Zones too far away will almost never fill within the 2h expiry.
 ENTRY_ZONE_MAX_ATR_DISTANCE = 0.7
 
-# ── OI / FUNDING FILTER (NEW — v9) ───────────────────────────────────────────
+# ── OI / FUNDING FILTER ───────────────────────────────────────────────────────
 # Fetch Hyperliquid perpetual metadata once per scan run and cache per symbol.
 OI_FUNDING_ENABLED = True
 
@@ -160,6 +155,40 @@ OB_MAX_AGE_BARS    = 20
 OB_IMPULSE_LOOKFORWARD = 8
 FVG_MIN_SIZE_ATR   = 0.3
 FVG_MAX_AGE_BARS   = 10
+
+# ── ORDER BLOCK LIFECYCLE (state tracking) ───────────────────────────────────
+# An OB's deepest historical penetration (0..1 of zone height) determines its
+# state. A close beyond the zone's far boundary invalidates it outright —
+# that candle closed through the zone, so the resting liquidity is gone, not
+# just dipped into.
+#   penetration >= OB_FULL_MITIGATION_THRESHOLD → "full"    (very low score)
+#   0 < penetration < threshold                  → "partial" (reduced score)
+#   penetration == 0                             → "fresh"   (highest score)
+#   close beyond zone                            → "invalidated" (never used)
+OB_FULL_MITIGATION_THRESHOLD = 0.95
+OB_PARTIAL_SCORE_PENALTY     = 1   # subtracted once per partial OB used in scoring
+
+# ── FAIR VALUE GAP MITIGATION (percentage fill) ──────────────────────────────
+# Deepest historical retracement into the gap (0..1 of gap height).
+#   < FVG_FRESH_MAX          → fresh            → full weight
+#   < FVG_MOSTLY_FRESH_MAX   → mostly fresh     → full weight
+#   < FVG_HALF_MITIGATED_MAX → half mitigated   → reduced weight (-1 penalty)
+#   < FVG_NEARLY_FILLED_MAX  → nearly filled    → reduced weight (-1 penalty)
+#   >= FVG_NEARLY_FILLED_MAX → fully mitigated  → excluded from selection
+FVG_FRESH_MAX           = 0.25
+FVG_MOSTLY_FRESH_MAX    = 0.50
+FVG_HALF_MITIGATED_MAX  = 0.80
+FVG_NEARLY_FILLED_MAX   = 0.95
+FVG_PARTIAL_SCORE_PENALTY = 1   # subtracted once per ≥50% mitigated FVG used in scoring
+
+# ── INVERSE FAIR VALUE GAP (IFVG) ────────────────────────────────────────────
+# A fully-filled FVG flips polarity: a filled bullish FVG becomes a bearish
+# IFVG (resistance), a filled bearish FVG becomes a bullish IFVG (support).
+# Reuses FVG_NEARLY_FILLED_MAX as the "fully filled" threshold so the two
+# concepts stay consistent (an FVG excluded from find_fvgs() for being fully
+# filled is exactly the population find_inverse_fvgs() picks up).
+IFVG_SCORE_BONUS        = 1     # confluence bonus for an aligned, active IFVG
+IFVG_BLOCK_BUFFER_ATR   = 0.1   # zone padding (× ATR) when checking entry overlap
 SWEEP_LOOKBACK     = 30
 EQUAL_HL_TOLERANCE = 0.002
 MSB_LOOKBACK       = 20
@@ -197,7 +226,7 @@ FIB_TOLERANCE_ATR  = 0.5  # 0.5 × current ATR_15m
 FIB_LEVELS        = [0.382, 0.5, 0.618, 0.786]
 FIB_GOLDEN_LOW    = 0.618
 FIB_GOLDEN_HIGH   = 0.786
-FIB_TOLERANCE_PCT = 0.005   # kept for legacy fallback; primary tolerance is FIB_TOLERANCE_ATR
+FIB_TOLERANCE_PCT = 0.005   # fallback only; primary tolerance is FIB_TOLERANCE_ATR
 FIB_SWING_LOOKBACK = 50     # Bars to find the last major swing for fib draw
 
 # ── SECTOR MAP ────────────────────────────────────────────────────────────────
@@ -217,7 +246,7 @@ SECTOR_MAP: dict[str, str] = {
     "ZECUSDT":    "privacy", "BCHUSDT": "privacy",
 }
 
-# ── PREMIUM / DISCOUNT FILTER (merged in from v1 — was missing in v11.8) ────
+# ── PREMIUM / DISCOUNT FILTER ────────────────────────────────────────────────
 # Classic SMC rule: never buy in premium (top of range), never sell in
 # discount (bottom of range). Computed on the 4H range. This is a HARD GATE
 # in compute_smc_signal(), not a scoring bonus.
@@ -226,13 +255,11 @@ PREMIUM_THRESHOLD  = 0.60   # close >= 60% of 4H range = premium
 DISCOUNT_THRESHOLD = 0.40   # close <= 40% of 4H range = discount
 
 # ── CONFLUENCE SCORING ───────────────────────────────────────────────────────
-# NOTE (merge v12): liquidity sweep, 15M MSB, and premium/discount alignment
-# are now MANDATORY hard gates inside compute_smc_signal() rather than
-# optional combo points (see v1 engine). Every signal that reaches scoring
-# already has a sweep + a displacement/MSB confirmation + correct PD zone,
-# so the achievable score floor is higher than in pure v11.8. Thresholds are
-# raised accordingly to keep the bar meaningful rather than letting the
-# now-guaranteed base factors trivially clear the old threshold.
+# NOTE: liquidity sweep, 15M MSB, and premium/discount alignment are
+# MANDATORY hard gates inside compute_smc_signal() rather than optional
+# combo points. Every signal that reaches scoring already has a sweep + a
+# displacement/MSB confirmation + correct PD zone, so the achievable score
+# floor is high. Thresholds are set accordingly to keep the bar meaningful.
 MIN_CONFLUENCE_SCORE  = 6
 STRONG_SIGNAL_SCORE   = 6   # A  grade — solid confirmation
 APLUS_SIGNAL_SCORE    = 8   # A+ grade — requires near-perfect stack
@@ -270,7 +297,7 @@ _CANDLE_CACHE_1D_TTL_S = 60 * 60 * 4  # 4-hour TTL
 _candle_cache_1h: dict[str, dict] = {}
 _CANDLE_CACHE_1H_TTL_S = 60 * 15  # 15-minute TTL — aligns with scan interval
 
-# ── OI / FUNDING CACHE (v9) ───────────────────────────────────────────────────
+# ── OI / FUNDING CACHE ────────────────────────────────────────────────────────
 # Populated once per scan run by fetch_all_oi_funding() in run_scan().
 # Key: coin string (e.g. "BTC"), not full symbol ("BTCUSDT").
 # Each entry: {"funding_rate": float, "open_interest": float, "prev_oi": float|None, "ts": float}
@@ -299,6 +326,9 @@ class OrderBlock:
     direction:  str       # "bull" | "bear"
     bar_index:  int
     timeframe:  str
+    state:          str   = "fresh"   # fresh | partial | full | invalidated
+    mitigation_pct: float = 0.0       # deepest penetration into the zone, 0..1
+    touches:        int   = 0         # number of candles that traded into the zone
 
 @dataclass
 class FairValueGap:
@@ -307,6 +337,18 @@ class FairValueGap:
     direction: str
     bar_index: int
     timeframe: str
+    mitigation_pct: float = 0.0       # 0.0 fresh ... 1.0 fully filled
+
+@dataclass
+class InverseFVG:
+    gap_high:  float
+    gap_low:   float
+    direction: str        # NEW polarity after the flip: "bull" (support) | "bear" (resistance)
+    bar_index: int
+    timeframe: str
+    state:          str   = "fresh"   # fresh | partial | full (re-tested but holding) | invalidated
+    mitigation_pct: float = 0.0       # deepest re-penetration since the flip, 0..1
+    touches:        int   = 0
 
 @dataclass
 class FibResult:
@@ -336,8 +378,8 @@ class SMCSignal:
     combos_hit:      list = field(default_factory=list)
     fib:             FibResult | None = None
     details:         dict = field(default_factory=dict)
-    funding_rate:    float | None = None   # per-8h funding at signal time (v9)
-    oi_usd:          float | None = None   # open interest in USD at signal time (v9)
+    funding_rate:    float | None = None   # per-8h funding at signal time
+    oi_usd:          float | None = None   # open interest in USD at signal time
     timestamp:       str = ""
 
 
@@ -455,7 +497,7 @@ def get_candles_1h_cached(symbol: str) -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OI / FUNDING  (v9)
+# OI / FUNDING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def fetch_all_oi_funding() -> None:
@@ -1004,13 +1046,11 @@ def get_htf_bias(candles_4h: list[dict]) -> str:
 
 def premium_discount_zone(candles_4h: list[dict], lookback: int = PREMIUM_DISCOUNT_LOOKBACK) -> dict:
     """
-    Merged in from v1 engine — v11.8 had no premium/discount concept at all.
-
     Returns the 4H range high/low over `lookback` bars plus where the current
     close sits within that range (0 = range low / deepest discount,
-    1 = range high / deepest premium). Classic SMC rule, enforced as a hard
-    gate in compute_smc_signal(): never buy in premium, never sell discount —
-    you want to be entering where smart money is accumulating/distributing,
+    1 = range high / deepest premium). Enforced as a hard gate in
+    compute_smc_signal(): never buy in premium, never sell discount — you
+    want to be entering where smart money is accumulating/distributing,
     not chasing into the zone where retail liquidity is thinnest.
     """
     window = candles_4h[-lookback:] if len(candles_4h) > lookback else candles_4h
@@ -1025,6 +1065,74 @@ def premium_discount_zone(candles_4h: list[dict], lookback: int = PREMIUM_DISCOU
     else:
         zone = "equilibrium"
     return {"high": hi, "low": lo, "position": pos, "zone": zone}
+
+def _track_ob_lifecycle(zone_high: float, zone_low: float, direction: str,
+                        candles: list[dict], start_idx: int, end_idx: int) -> tuple[str, float, int]:
+    """
+    Continuously scan every candle from start_idx to end_idx (the OB's full
+    remaining lifespan, not just the impulse-confirmation window) and return
+    (state, deepest_mitigation_pct, touches).
+
+    A close beyond the zone's far boundary invalidates the OB immediately —
+    the zone has been structurally broken, not just dipped into.
+    """
+    zone_range = zone_high - zone_low
+    if zone_range <= 0:
+        return "invalidated", 1.0, 0
+
+    deepest = 0.0
+    touches = 0
+    for j in range(start_idx, end_idx):
+        c = candles[j]
+        if direction == "bull":
+            if c["c"] < zone_low:
+                return "invalidated", 1.0, touches
+            if c["l"] <= zone_high:
+                touches += 1
+                penetration = (zone_high - max(c["l"], zone_low)) / zone_range
+                deepest = max(deepest, penetration)
+        else:
+            if c["c"] > zone_high:
+                return "invalidated", 1.0, touches
+            if c["h"] >= zone_low:
+                touches += 1
+                penetration = (min(c["h"], zone_high) - zone_low) / zone_range
+                deepest = max(deepest, penetration)
+
+    deepest = min(max(deepest, 0.0), 1.0)
+    if deepest >= OB_FULL_MITIGATION_THRESHOLD:
+        state = "full"
+    elif deepest > 0.0:
+        state = "partial"
+    else:
+        state = "fresh"
+    return state, deepest, touches
+
+
+def _track_fvg_mitigation(gap_high: float, gap_low: float, direction: str,
+                          candles: list[dict], start_idx: int, end_idx: int) -> float:
+    """
+    Continuously scan every candle after gap formation until present and
+    return the deepest historical retracement into the gap as a 0..1 ratio,
+    rather than a binary touched/untouched flag.
+    """
+    gap_range = gap_high - gap_low
+    if gap_range <= 0:
+        return 1.0
+
+    deepest = 0.0
+    for j in range(start_idx, end_idx):
+        c = candles[j]
+        if direction == "bull":
+            if c["l"] <= gap_high:
+                penetration = (gap_high - max(c["l"], gap_low)) / gap_range
+                deepest = max(deepest, penetration)
+        else:
+            if c["h"] >= gap_low:
+                penetration = (min(c["h"], gap_high) - gap_low) / gap_range
+                deepest = max(deepest, penetration)
+    return min(max(deepest, 0.0), 1.0)
+
 
 def find_order_blocks(candles: list[dict], timeframe: str,
                       atr: float, bias: str) -> list[OrderBlock]:
@@ -1046,16 +1154,15 @@ def find_order_blocks(candles: list[dict], timeframe: str,
                 if cur_price > cur["h"]:
                     zone_mid = (cur["h"] + cur["l"]) / 2
 
-                    # Mitigation check — if any subsequent candle closed below zone_mid,
-                    # the demand at this OB was absorbed. Exclude mitigated OBs.
-                    mitigated = any(
-                        candles[j]["c"] < zone_mid
-                        for j in range(i + 1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n))
-                    )
-                    if mitigated:
-                        continue   # OB demand was consumed — skip
+                    # Full lifecycle tracking — every candle from formation to
+                    # now, not just the OB_IMPULSE_LOOKFORWARD window.
+                    state, mit_pct, touches = _track_ob_lifecycle(
+                        zone_mid, cur["l"], "bull", candles, i + 1, n)
+                    if state == "invalidated":
+                        continue   # zone structurally broken — never used
 
-                    valid.append(OrderBlock(zone_mid, cur["l"], "bull", i, timeframe))
+                    valid.append(OrderBlock(zone_mid, cur["l"], "bull", i, timeframe,
+                                            state=state, mitigation_pct=mit_pct, touches=touches))
 
         if bias in ("bear", "neutral") and cur["c"] > cur["o"]:
             move_dn = cur["l"] - min(candles[j]["l"] for j in range(i+1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n)))
@@ -1063,108 +1170,281 @@ def find_order_blocks(candles: list[dict], timeframe: str,
                 if cur_price < cur["l"]:
                     zone_mid = (cur["h"] + cur["l"]) / 2
 
-                    # Mitigation check — if any subsequent candle closed above zone_mid,
-                    # the supply at this OB was absorbed. Exclude mitigated OBs.
-                    mitigated = any(
-                        candles[j]["c"] > zone_mid
-                        for j in range(i + 1, min(i + OB_IMPULSE_LOOKFORWARD + 1, n))
-                    )
-                    if mitigated:
-                        continue   # OB supply was consumed — skip
+                    state, mit_pct, touches = _track_ob_lifecycle(
+                        cur["h"], zone_mid, "bear", candles, i + 1, n)
+                    if state == "invalidated":
+                        continue   # zone structurally broken — never used
 
-                    valid.append(OrderBlock(cur["h"], zone_mid, "bear", i, timeframe))
+                    valid.append(OrderBlock(cur["h"], zone_mid, "bear", i, timeframe,
+                                            state=state, mitigation_pct=mit_pct, touches=touches))
 
     return valid
 
-def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValueGap]:
-    fvgs  = []
-    n     = len(candles)
-    cur_p = candles[-1]["c"]
+def _detect_fvg_raw(candles: list[dict], timeframe: str, atr: float) -> list[FairValueGap]:
+    """
+    Detect every 3-candle FVG in the lookback window with its full historical
+    mitigation_pct, regardless of current fill state or price proximity.
+    Shared base for find_fvgs() (active gaps) and find_inverse_fvgs() (flipped,
+    fully-filled gaps) — avoids duplicating the 3-candle scan logic.
+    """
+    gaps = []
+    n    = len(candles)
     for i in range(max(0, n - FVG_MAX_AGE_BARS - 2), n - 2):
         c1, c3 = candles[i], candles[i+2]
         if c3["l"] > c1["h"] and (c3["l"] - c1["h"]) >= atr * FVG_MIN_SIZE_ATR:
-            # Price must be approaching the gap from above (above gap bottom, at or below gap top).
-            # If cur_p > c3["l"], price has already traded through the entire gap — zone is consumed.
-            if c1["h"] < cur_p <= c3["l"]:
-                fvgs.append(FairValueGap(c3["l"], c1["h"], "bull", i+1, timeframe))
+            mit_pct = _track_fvg_mitigation(c3["l"], c1["h"], "bull", candles, i + 2, n)
+            gaps.append(FairValueGap(c3["l"], c1["h"], "bull", i+1, timeframe, mitigation_pct=mit_pct))
         if c3["h"] < c1["l"] and (c1["l"] - c3["h"]) >= atr * FVG_MIN_SIZE_ATR:
-            # Price must be approaching the gap from below (below gap top, at or above gap bottom).
-            # If cur_p < c3["h"], price has already traded through the entire gap — zone is consumed.
-            if c3["h"] <= cur_p < c1["l"]:
-                fvgs.append(FairValueGap(c1["l"], c3["h"], "bear", i+1, timeframe))
+            mit_pct = _track_fvg_mitigation(c1["l"], c3["h"], "bear", candles, i + 2, n)
+            gaps.append(FairValueGap(c1["l"], c3["h"], "bear", i+1, timeframe, mitigation_pct=mit_pct))
+    return gaps
+
+def find_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[FairValueGap]:
+    cur_p = candles[-1]["c"]
+    fvgs  = []
+    for g in _detect_fvg_raw(candles, timeframe, atr):
+        if g.mitigation_pct >= FVG_NEARLY_FILLED_MAX:
+            continue   # fully filled — handled by find_inverse_fvgs() instead
+        # Price must still be approaching the gap, not already through it.
+        if g.direction == "bull" and not (g.gap_low < cur_p <= g.gap_high):
+            continue
+        if g.direction == "bear" and not (g.gap_low <= cur_p < g.gap_high):
+            continue
+        fvgs.append(g)
     return fvgs
 
-def detect_msb(candles: list[dict], direction: str) -> bool:
+def find_inverse_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[InverseFVG]:
     """
-    A single confirmed close breaking swing structure, with an ATR proximity check:
-    the close must be within 0.5× ATR_15m of the swing threshold. This catches the
-    break early while still rejecting runaway candles (news spikes) where the body
-    has moved too far for the entry zone to still be reachable. Also requires
-    body/range ratio ≥ MSB_BODY_RATIO_MIN — a doji or spinning top closing past a
-    swing level is not a displacement move.
+    Fully-filled FVGs flip polarity into IFVGs and are tracked as active
+    support/resistance zones. Bullish FVG fully filled → bearish IFVG.
+    Bearish FVG fully filled → bullish IFVG. Lifecycle is tracked the same
+    way as an order block: a close fully through the zone invalidates it,
+    a wick-only retest counts as a touch and reduces (but doesn't remove) it.
+    """
+    n = len(candles)
+    ifvgs = []
+    for g in _detect_fvg_raw(candles, timeframe, atr):
+        if g.mitigation_pct < FVG_NEARLY_FILLED_MAX:
+            continue   # not fully filled — still an active FVG, not an IFVG
+        inv_dir = "bear" if g.direction == "bull" else "bull"
+        state, mit_pct, touches = _track_ob_lifecycle(
+            g.gap_high, g.gap_low, inv_dir, candles, g.bar_index + 1, n)
+        if state == "invalidated":
+            continue   # zone has since been closed through — no longer active
+        ifvgs.append(InverseFVG(g.gap_high, g.gap_low, inv_dir, g.bar_index, timeframe,
+                                state=state, mitigation_pct=mit_pct, touches=touches))
+    return ifvgs
 
-    ATR is computed inline from the last ATR_LEN bars since detect_msb() is a pure
-    structural function and should not carry external state.
+
+
+def detect_market_structure(candles: list[dict], direction: str) -> dict | None:
+    """
+    Institutional market structure classifier: BOS / CHoCH / MSS.
+
+    Internal trend is derived from the last two confirmed swing highs and
+    swing lows (HH+HL = bull, LL+LH = bear; anything else = ranging).
+
+      BOS   — close breaks structure in the SAME direction as internal trend
+              (trend continuation).
+      CHoCH — close breaks structure AGAINST an established (non-ranging)
+              trend for the first time — the nearest opposite-trend swing
+              level is taken out, but the prior swing level beyond it still
+              holds.
+      MSS   — confirmed shift: same as CHoCH, but the break also clears the
+              prior (older) opposite-trend swing level, confirming the new
+              trend is real follow-through rather than a single-bar fakeout.
+
+    Ranging markets (no clear HH/HL or LL/LH sequence) never produce a
+    CHoCH/MSS label — there is no established trend to break against, so a
+    break there is classified as a plain BOS (or rejected if no break).
+
+    Same displacement filters as the prior MSB logic: body/range ratio gate
+    and an ATR proximity gate so runaway candles are still rejected.
     """
     n = len(candles)
     if n < MSB_LOOKBACK + MSB_SWING_BARS + 1:
-        return False
+        return None
 
     cur_close = candles[-1]["c"]
     cur_range = candles[-1]["h"] - candles[-1]["l"]
     cur_body  = abs(candles[-1]["c"] - candles[-1]["o"])
+    if cur_range > 0 and (cur_body / cur_range) < MSB_BODY_RATIO_MIN:
+        return None   # indecision candle — not a displacement move
 
-    if cur_range > 0:
-        body_ratio = cur_body / cur_range
-        if body_ratio < MSB_BODY_RATIO_MIN:
-            return False   # indecision candle — not a displacement move
+    lookback = candles[-(MSB_LOOKBACK):]
+    nb       = MSB_SWING_BARS
+    atr_15m  = calc_atr(candles, ATR_LEN)
 
-    lookback  = candles[-(MSB_LOOKBACK):]
-    nb        = MSB_SWING_BARS
+    swing_highs = [c["h"] for i, c in enumerate(lookback)
+                   if nb <= i <= len(lookback) - nb - 2 and is_swing_high(lookback, i, nb)]
+    swing_lows  = [c["l"] for i, c in enumerate(lookback)
+                   if nb <= i <= len(lookback) - nb - 2 and is_swing_low(lookback, i, nb)]
+    if not swing_highs or not swing_lows:
+        return None
 
-    # Compute ATR inline for the proximity gate
-    atr_15m = calc_atr(candles, ATR_LEN)
+    # Internal trend from the last two swings of each type
+    trend = "ranging"
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+        if swing_highs[-1] > swing_highs[-2] and swing_lows[-1] > swing_lows[-2]:
+            trend = "bull"
+        elif swing_highs[-1] < swing_highs[-2] and swing_lows[-1] < swing_lows[-2]:
+            trend = "bear"
 
     if direction == "long":
-        highs = [c["h"] for i, c in enumerate(lookback)
-                 if nb <= i <= len(lookback) - nb - 2 and is_swing_high(lookback, i, nb)]
-        if not highs:
-            return False
-        threshold = max(highs[-3:] if len(highs) >= 3 else highs)
-        broke_structure = cur_close > threshold
-        # ATR proximity gate: close must be within 0.5× ATR of threshold.
-        # Rejects runaway candles where the entry zone is no longer reachable.
-        close_enough    = (cur_close - threshold) < atr_15m * 0.5
-        return broke_structure and close_enough
-
+        threshold = max(swing_highs[-3:] if len(swing_highs) >= 3 else swing_highs)
+        broke        = cur_close > threshold
+        close_enough = (cur_close - threshold) < atr_15m * 0.5
+        prior_pool   = swing_highs[-6:-3]
+        prior_thresh = max(prior_pool) if prior_pool else None
+        broke_prior  = prior_thresh is not None and cur_close > prior_thresh
+        trend_match  = (trend == "bull")
     else:
-        lows = [c["l"] for i, c in enumerate(lookback)
-                if nb <= i <= len(lookback) - nb - 2 and is_swing_low(lookback, i, nb)]
-        if not lows:
-            return False
-        threshold = min(lows[-3:] if len(lows) >= 3 else lows)
-        broke_structure = cur_close < threshold
-        close_enough    = (threshold - cur_close) < atr_15m * 0.5
-        return broke_structure and close_enough
+        threshold = min(swing_lows[-3:] if len(swing_lows) >= 3 else swing_lows)
+        broke        = cur_close < threshold
+        close_enough = (threshold - cur_close) < atr_15m * 0.5
+        prior_pool   = swing_lows[-6:-3]
+        prior_thresh = min(prior_pool) if prior_pool else None
+        broke_prior  = prior_thresh is not None and cur_close < prior_thresh
+        trend_match  = (trend == "bear")
+
+    if not (broke and close_enough):
+        return None
+
+    if trend == "ranging" or trend_match:
+        # Continuation of an established trend (or no trend to break against)
+        return {"type": "BOS", "trend": trend, "score_bonus": 0}
+
+    # Break against an established trend: CHoCH on first violation,
+    # MSS once the older opposite-trend swing is cleared too (confirmed shift).
+    if broke_prior:
+        return {"type": "MSS", "trend": trend, "score_bonus": 2}
+    return {"type": "CHoCH", "trend": trend, "score_bonus": 1}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # COMBO 2 — LIQUIDITY SWEEP
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def find_equal_levels(candles: list[dict], direction: str) -> list[float]:
-    # Sorting guarantees any pair within EQUAL_HL_TOLERANCE must be adjacent
-    # in the sorted array, so a single linear pass suffices.
-    # Complexity: O(n log n) vs O(n²) — future-proofs for larger SWEEP_LOOKBACK.
+def _pool_strength(touches: int) -> tuple[str, int]:
+    if touches >= 4: return "very_strong", 3
+    if touches == 3: return "strong", 2
+    return "normal", 1   # 2 touches
+
+def find_equal_levels(candles: list[dict], direction: str) -> list[dict]:
+    """
+    Cluster nearby equal highs/lows into liquidity pools instead of just
+    pairing adjacent values. Sorting guarantees any cluster within
+    EQUAL_HL_TOLERANCE is contiguous in the sorted array, so a single linear
+    pass suffices — O(n log n), same complexity class as the old pairing
+    version, but groups runs of any length (2, 3, 4+ touches) instead of
+    only adjacent pairs.
+
+    Returns pools sorted by strength (most touches first) so callers that
+    pick the first match get the highest-confidence liquidity pool.
+    """
     window = candles[max(0, len(candles) - SWEEP_LOOKBACK):]
     values = sorted([c["l"] for c in window] if direction == "long"
                     else [c["h"] for c in window])
-    levels = []
-    for i in range(len(values) - 1):
-        a, b = values[i], values[i + 1]
-        if abs(a - b) / max(a, 1e-9) <= EQUAL_HL_TOLERANCE:
-            levels.append((a + b) / 2)
-    return sorted(set(round(l, 8) for l in levels))
+    if len(values) < 2:
+        return []
+
+    pools: list[dict] = []
+    cluster = [values[0]]
+    for v in values[1:]:
+        if abs(v - cluster[-1]) / max(cluster[-1], 1e-9) <= EQUAL_HL_TOLERANCE:
+            cluster.append(v)
+        else:
+            if len(cluster) >= 2:
+                pools.append(_make_pool(cluster))
+            cluster = [v]
+    if len(cluster) >= 2:
+        pools.append(_make_pool(cluster))
+
+    pools.sort(key=lambda p: -p["touches"])
+    return pools
+
+def _make_pool(cluster: list[float]) -> dict:
+    strength, strength_score = _pool_strength(len(cluster))
+    return {
+        "price":          round(sum(cluster) / len(cluster), 8),
+        "touches":        len(cluster),
+        "range":          (round(min(cluster), 8), round(max(cluster), 8)),
+        "strength":       strength,
+        "strength_score": strength_score,
+    }
+
+def _level_is_swept(candles: list[dict], level: float, side: str) -> bool:
+    """
+    side='high' → level is resting sell-side liquidity (equal highs / swing
+    high); swept if any candle has already closed beyond it.
+    side='low'  → resting buy-side liquidity; swept if any candle closed below it.
+    """
+    if side == "high":
+        return any(c["c"] > level for c in candles)
+    return any(c["c"] < level for c in candles)
+
+def _is_untouched_swing(level: float, candles: list[dict], formed_idx: int, side: str) -> bool:
+    """A swing is untouched if no candle since its formation has traded beyond it."""
+    for c in candles[formed_idx + 1:]:
+        if side == "high" and c["h"] >= level:
+            return False
+        if side == "low" and c["l"] <= level:
+            return False
+    return True
+
+def find_liquidity_tp2(direction: str, tp1: float, tp2_cap: float,
+                       candles_1h: list[dict], candles_4h: list[dict]) -> tuple[float, str]:
+    """
+    Institutional TP2 targeting — genuine resting liquidity, not just the
+    nearest swing. Priority cascade, each tier excluding swept/mitigated levels:
+
+      1. Strong equal-high/low cluster (3+ touches), untouched
+      2. Any liquidity pool (2+ touches), untouched
+      3. Untouched confirmed swing high/low
+      4. Traditional (possibly touched) swing high/low — last-resort fallback
+
+    Candidates are restricted to the (tp1, tp2_cap) band so TP2 is always a
+    realistic, reachable target. Returns (tp2, source_label).
+    """
+    pool_side    = "short" if direction == "long" else "long"   # opposite-side resting liquidity
+    sweep_side   = "high"  if direction == "long" else "low"
+    lookback_4h  = candles_4h[-40:]
+    lo, hi       = (tp1, tp2_cap) if direction == "long" else (tp2_cap, tp1)
+    in_range     = lambda p: lo < p < hi
+    pick_nearest = min if direction == "long" else max
+
+    pools = [p for p in find_equal_levels(candles_1h, pool_side)
+             if in_range(p["price"]) and not _level_is_swept(candles_1h, p["price"], sweep_side)]
+    pools.sort(key=lambda p: p["price"], reverse=(direction == "short"))
+
+    strong_pools = [p for p in pools if p["strength_score"] >= 2]
+    if strong_pools:
+        best = strong_pools[0]
+        return best["price"], f"Strong liquidity cluster ({best['strength']}, {best['touches']} touches)"
+    if pools:
+        best = pools[0]
+        return best["price"], f"Liquidity pool ({best['strength']}, {best['touches']} touches)"
+
+    swing_fn = is_swing_high if direction == "long" else is_swing_low
+    key      = "h" if direction == "long" else "l"
+    swing_idxs = [i for i in range(len(lookback_4h))
+                  if swing_fn(lookback_4h, i, 2) and in_range(lookback_4h[i][key])]
+
+    untouched = [lookback_4h[i][key] for i in swing_idxs
+                 if _is_untouched_swing(lookback_4h[i][key], lookback_4h, i, sweep_side)]
+    if untouched:
+        return pick_nearest(untouched), f"Untouched swing {sweep_side}"
+
+    all_swings = [lookback_4h[i][key] for i in swing_idxs]
+    if all_swings:
+        return pick_nearest(all_swings), f"Swing {sweep_side}"
+
+    candle_extremes = [c[key] for c in lookback_4h if in_range(c[key])]
+    if candle_extremes:
+        return pick_nearest(candle_extremes), "Nearest candle extreme"
+
+    return tp2_cap, "Fixed R:R cap (no liquidity target found)"
+
 
 def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | None:
     """
@@ -1181,8 +1461,8 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
         return None
 
     prior  = candles_1h[:-SWEEP_MULTIBAR_LOOKBACK]
-    levels = find_equal_levels(prior, direction)
-    if not levels:
+    pools  = find_equal_levels(prior, direction)   # strongest pool first
+    if not pools:
         return None
 
     # Check the last SWEEP_MULTIBAR_LOOKBACK bars (most recent first)
@@ -1194,21 +1474,29 @@ def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | Non
         bar = candles_1h[bar_idx]
 
         if direction == "long":
-            for lvl in levels:
+            for pool in pools:
+                lvl = pool["price"]
                 if bar["l"] < lvl and bar["c"] > lvl:
                     return {"level": lvl,
                             "wick_depth": lvl - bar["l"],
                             "direction": "long",
                             "sweep_bar": bar_idx,
-                            "bars_ago": offset}
+                            "bars_ago": offset,
+                            "pool_touches": pool["touches"],
+                            "pool_strength": pool["strength"],
+                            "pool_strength_score": pool["strength_score"]}
         else:
-            for lvl in levels:
+            for pool in pools:
+                lvl = pool["price"]
                 if bar["h"] > lvl and bar["c"] < lvl:
                     return {"level": lvl,
                             "wick_height": bar["h"] - lvl,
                             "direction": "short",
                             "sweep_bar": bar_idx,
-                            "bars_ago": offset}
+                            "bars_ago": offset,
+                            "pool_touches": pool["touches"],
+                            "pool_strength": pool["strength"],
+                            "pool_strength_score": pool["strength_score"]}
     return None
 
 
@@ -1319,9 +1607,9 @@ def compute_smc_signal(symbol: str,
                         candles_1d:  list[dict],
                         oi_data:     dict | None = None) -> SMCSignal | None:
     """
-    Full Combo 1 + Combo 2 + Fibonacci confluence engine — merged edition.
+    Full Combo 1 + Combo 2 + Fibonacci confluence engine.
 
-    HARD GATES (must all pass before any scoring happens; merged from v1):
+    HARD GATES (must all pass before any scoring happens):
       - 4H HTF bias non-neutral, agrees with 1D bias (if 1D has one) and 1H
         (if 1H has a confirmed opposing trend, reject)
       - Premium/discount: never long in 4H premium, never short in 4H discount
@@ -1329,11 +1617,13 @@ def compute_smc_signal(symbol: str,
       - 15M MSB present in the trade direction (execution-timeframe confirmation)
       - Funding hard-block (crowd already maximally positioned against us)
       - A valid entry zone (OB and/or FVG) must exist — never fabricated
+      - Entry zone must not overlap an opposing, active IFVG
 
     Scoring (on top of the gates above, max ~10):
       +1  PD alignment (buying discount / selling premium, not just non-opposed)
       +1  4H Order Block (approaching zone)
       +1  4H or 1H Fair Value Gap
+      +1  Aligned, active Inverse FVG (IFVG) support/resistance
       +1  15M OB / FVG (precision entry layer)
       +1  Fibonacci confluence (0.382 / 0.5 / 0.618 / 0.786)
               → +2 if in golden zone (0.618–0.786)  [upgrades score by 2, not 1]
@@ -1341,6 +1631,18 @@ def compute_smc_signal(symbol: str,
       +1/+2 Sweep volume confirmation
       +1  1D ADX strong-trend bonus
       OI spike: -2 penalty (not a hard block) if OI grew >5% during the sweep
+
+    Order Block / FVG quality (lifecycle-aware, not binary):
+      Order Blocks carry a state — fresh / partial / full / invalidated —
+      derived from the deepest historical penetration into the zone across
+      its entire remaining lifespan (not just the impulse-confirmation
+      window). Invalidated OBs (closed through) are never selectable. Fully
+      mitigated OBs (>=95% penetrated) are never selectable either. Partial
+      OBs are selectable but penalised -OB_PARTIAL_SCORE_PENALTY.
+      FVGs carry a continuous mitigation_pct (0..1) instead of a binary
+      touched flag. FVGs >=FVG_NEARLY_FILLED_MAX are never selectable.
+      FVGs >=FVG_MOSTLY_FRESH_MAX (half+ filled) are selectable but
+      penalised -FVG_PARTIAL_SCORE_PENALTY.
     """
     if len(candles_4h) < 60 or len(candles_1h) < 60 or len(candles_15m) < 60:
         return None
@@ -1376,7 +1678,7 @@ def compute_smc_signal(symbol: str,
         print(f"  [NEAR MISS] {symbol} | killer=1H_4H_DISAGREE | score=0 | dir={direction} | 4H={bias} 1H={bias_1h}")
         return None   # 1H opposes 4H — counter-trend setup, skip
 
-    # ── Step 1e: Premium / Discount Hard Gate (merged from v1) ──────────────
+    # ── Step 1e: Premium / Discount Hard Gate ───────────────────────────────
     # Classic SMC rule: never buy in premium, never sell in discount. Without
     # this gate, the engine could happily send a "long" signal while price is
     # sitting at the top of its 4H range — chasing, not accumulating. This is
@@ -1392,7 +1694,7 @@ def compute_smc_signal(symbol: str,
               f"pos={pd['position']:.2f}")
         return None
 
-    # ── Step 1d: Funding Hard Block (v9) ────────────────────────────────────
+    # ── Step 1d: Funding Hard Block ─────────────────────────────────────────
     # If the crowd is already overwhelmingly positioned in the signal direction,
     # the smart money squeeze has likely already occurred — skip the setup.
     if oi_data and OI_FUNDING_ENABLED:
@@ -1428,16 +1730,23 @@ def compute_smc_signal(symbol: str,
     obs_4h  = find_order_blocks(candles_4h, "4h", atr_4h, bias)
     near_ob = None
     if direction == "long":
-        candidates = [ob for ob in obs_4h if ob.direction == "bull" and ob.price_high < cur_p]
+        candidates = [ob for ob in obs_4h if ob.direction == "bull" and ob.price_high < cur_p
+                      and ob.state != "full"]
         if candidates:
-            near_ob = max(candidates, key=lambda x: x.price_high)
+            fresh = [ob for ob in candidates if ob.state == "fresh"]
+            pool  = fresh if fresh else candidates
+            near_ob = max(pool, key=lambda x: x.price_high)
     else:
-        candidates = [ob for ob in obs_4h if ob.direction == "bear" and ob.price_low > cur_p]
+        candidates = [ob for ob in obs_4h if ob.direction == "bear" and ob.price_low > cur_p
+                      and ob.state != "full"]
         if candidates:
-            near_ob = min(candidates, key=lambda x: x.price_low)
+            fresh = [ob for ob in candidates if ob.state == "fresh"]
+            pool  = fresh if fresh else candidates
+            near_ob = min(pool, key=lambda x: x.price_low)
     has_4h_ob = near_ob is not None
     if has_4h_ob:
-        details["4h_ob"] = {"high": near_ob.price_high, "low": near_ob.price_low}
+        details["4h_ob"] = {"high": near_ob.price_high, "low": near_ob.price_low,
+                            "state": near_ob.state, "mitigation_pct": round(near_ob.mitigation_pct, 3)}
 
     # ── Step 3: FVG (4H or 1H) ─────────────────────────────────────────────
     fvgs_4h  = find_fvgs(candles_4h, "4h", atr_4h)
@@ -1455,19 +1764,55 @@ def compute_smc_signal(symbol: str,
     has_fvg = near_fvg is not None
     if has_fvg:
         details["fvg"] = {"high": near_fvg.gap_high, "low": near_fvg.gap_low,
-                          "tf": near_fvg.timeframe}
+                          "tf": near_fvg.timeframe,
+                          "mitigation_pct": round(near_fvg.mitigation_pct, 3)}
 
-    # ── Step 4: Liquidity Sweep (HARD GATE — merged from v1) ────────────────
+    # ── Step 3b: Inverse Fair Value Gap (IFVG) ──────────────────────────────
+    # Fully-filled FVGs flip polarity into active support/resistance zones.
+    # Aligned IFVG (same polarity as trade direction) sitting between price
+    # and the target is a confluence bonus. Opposing IFVGs are handled later
+    # as an entry-zone exclusion gate (see Step 6b).
+    all_ifvgs = find_inverse_fvgs(candles_4h, "4h", atr_4h) + find_inverse_fvgs(candles_1h, "1h", atr_1h)
+    near_ifvg = None
+    if direction == "long":
+        aligned = [g for g in all_ifvgs if g.direction == "bull" and g.gap_high < cur_p]
+        if aligned:
+            near_ifvg = max(aligned, key=lambda x: x.gap_high)
+    else:
+        aligned = [g for g in all_ifvgs if g.direction == "bear" and g.gap_low > cur_p]
+        if aligned:
+            near_ifvg = min(aligned, key=lambda x: x.gap_low)
+    has_ifvg = near_ifvg is not None
+    if has_ifvg:
+        score += IFVG_SCORE_BONUS
+        combos.append("IFVG_ALIGN")
+        details["ifvg"] = {"high": near_ifvg.gap_high, "low": near_ifvg.gap_low,
+                           "tf": near_ifvg.timeframe, "state": near_ifvg.state,
+                           "direction": near_ifvg.direction}
+
+    # ── Step 4: Liquidity Sweep (HARD GATE) ─────────────────────────────────
     # A setup with no engineered liquidity grabbed before the move is not a
-    # genuine SMC setup — it's just an EMA-bias trade with extra steps. v11.8
-    # treated this as an optional combo contributor; that's how weak setups
-    # with only a 15M OB+FVG (no sweep at all) used to slip through.
+    # genuine SMC setup — it's just an EMA-bias trade with extra steps. This
+    # is a hard gate, not an optional combo contributor, so weak setups with
+    # only a 15M OB+FVG (no sweep at all) cannot slip through.
     sweep = detect_liquidity_sweep(candles_1h, direction)
     has_sweep = sweep is not None
     if not has_sweep:
         print(f"  [NEAR MISS] {symbol} | killer=NO_LIQUIDITY_SWEEP | score=0 | dir={direction}")
         return None
     details["sweep"] = sweep
+
+    # Liquidity pool strength bonus — a sweep through a pool with more prior
+    # touches is a higher-confidence liquidity grab (more resting orders).
+    #   2 touches (normal)      → +0
+    #   3 touches (strong)      → +1
+    #   4+ touches (very strong)→ +2
+    pool_bonus = sweep["pool_strength_score"] - 1
+    if pool_bonus > 0:
+        score += pool_bonus
+        combos.append(f"LIQ_POOL_{sweep['pool_strength'].upper()}")
+    details["liquidity_pool"] = {"touches": sweep["pool_touches"],
+                                  "strength": sweep["pool_strength"]}
 
     # ── Step 4b: OI Spike Block ───────────────────────────────────────────────
     # When a liquidity sweep is detected, check whether OI is spiking.
@@ -1492,7 +1837,7 @@ def compute_smc_signal(symbol: str,
                 print(f"    [OI] {symbol} OI delta {oi_delta_pct*100:+.2f}% "
                       f"— no spike detected (threshold +{OI_SPIKE_BLOCK_PCT*100:.0f}%)")
 
-    # ── Step 4c: Funding Alignment Bonus (v9) ───────────────────────────────
+    # ── Step 4c: Funding Alignment Bonus ────────────────────────────────────
     # When the funding rate is mildly against the crowded side (i.e. in our
     # favour), it means the over-leveraged crowd is being squeezed in our
     # direction. This is a +1 bonus, not a gate.
@@ -1508,17 +1853,25 @@ def compute_smc_signal(symbol: str,
             print(f"    [FUNDING ALIGN] {symbol} {direction.upper()} — "
                   f"funding {fr*100:+.4f}%/8h favours direction")
 
-    # ── Step 5: 15M MSB (HARD GATE — merged from v1) ─────────────────────────
+    # ── Step 5: 15M MSB (HARD GATE) ──────────────────────────────────────────
     # 15M is execution-only: it must show a genuine structure break/
     # displacement in the trade direction before we treat the HTF bias as
     # actionable right now. Without this gate, signals could fire purely off
     # 4H/1H context with no confirmation that the move has actually started
     # on the entry timeframe — the classic "early and wrong" failure mode.
-    has_msb = detect_msb(candles_15m, direction)
+    structure = detect_market_structure(candles_15m, direction)
+    has_msb   = structure is not None
     if not has_msb:
         print(f"  [NEAR MISS] {symbol} | killer=NO_15M_MSB | score={score} | dir={direction} | combos={combos}")
         return None
     details["msb_15m"] = True
+    details["structure_type"] = structure["type"]
+    if structure["type"] == "CHoCH":
+        score += structure["score_bonus"]
+        combos.append("CHOCH_CONFIRMED")
+    elif structure["type"] == "MSS":
+        score += structure["score_bonus"]
+        combos.append("MSS_CONFIRMED")
 
     # ── Step 6: 15M OB / FVG ────────────────────────────────────────────────
     obs_15m  = find_order_blocks(candles_15m, "15m", atr_15m, bias)
@@ -1526,28 +1879,33 @@ def compute_smc_signal(symbol: str,
     near_ob_15m  = None
     near_fvg_15m = None
     if direction == "long":
-        b = [ob for ob in obs_15m if ob.direction == "bull" and ob.price_high < cur_p]
-        if b: near_ob_15m = max(b, key=lambda x: x.price_high)
+        b = [ob for ob in obs_15m if ob.direction == "bull" and ob.price_high < cur_p and ob.state != "full"]
+        if b:
+            fresh = [ob for ob in b if ob.state == "fresh"]
+            near_ob_15m = max(fresh if fresh else b, key=lambda x: x.price_high)
         b = [f for f in fvgs_15m if f.direction == "bull" and f.gap_high < cur_p]
         if b: near_fvg_15m = max(b, key=lambda x: x.gap_high)
     else:
-        b = [ob for ob in obs_15m if ob.direction == "bear" and ob.price_low > cur_p]
-        if b: near_ob_15m = min(b, key=lambda x: x.price_low)
+        b = [ob for ob in obs_15m if ob.direction == "bear" and ob.price_low > cur_p and ob.state != "full"]
+        if b:
+            fresh = [ob for ob in b if ob.state == "fresh"]
+            near_ob_15m = min(fresh if fresh else b, key=lambda x: x.price_low)
         b = [f for f in fvgs_15m if f.direction == "bear" and f.gap_low > cur_p]
         if b: near_fvg_15m = min(b, key=lambda x: x.gap_low)
     has_15m_precision = (near_ob_15m is not None or near_fvg_15m is not None)
     if near_ob_15m:
-        details["15m_ob"] = {"high": near_ob_15m.price_high, "low": near_ob_15m.price_low}
+        details["15m_ob"] = {"high": near_ob_15m.price_high, "low": near_ob_15m.price_low,
+                             "state": near_ob_15m.state, "mitigation_pct": round(near_ob_15m.mitigation_pct, 3)}
     if near_fvg_15m:
-        details["15m_fvg"] = {"high": near_fvg_15m.gap_high, "low": near_fvg_15m.gap_low}
+        details["15m_fvg"] = {"high": near_fvg_15m.gap_high, "low": near_fvg_15m.gap_low,
+                              "mitigation_pct": round(near_fvg_15m.mitigation_pct, 3)}
 
     # Scores are awarded per combo unit, not per individual indicator.
     # This forces better-aligned setups and prevents a hodgepodge of unrelated
     # factors from accumulating to the score threshold.
     #
-    # NOTE (merge v12): has_msb and has_sweep are now ALWAYS True at this
-    # point (both are hard gates above) — so combo_a_hits has a guaranteed
-    # floor of 1 (from has_msb) and combo_b_hits has a guaranteed floor of 1
+    # NOTE: has_msb and has_sweep are ALWAYS True at this point (both are
+    # hard gates above) — so combo_a_hits has a guaranteed floor of 1 (from has_msb) and combo_b_hits has a guaranteed floor of 1
     # (from has_sweep). The thresholds (MIN_CONFLUENCE_SCORE etc.) were raised
     # accordingly so this guaranteed floor doesn't trivially clear the bar —
     # a setup still needs real additional confluence (4H OB, FVG, 15M zone,
@@ -1577,6 +1935,32 @@ def compute_smc_signal(symbol: str,
         score += 2
         combos.append("B-partial")
     # combo_b_hits == 1: no bonus — single factor provides no structure
+
+    # ── Order Block State Penalty ────────────────────────────────────────────
+    # Fresh OBs already earned full combo credit above. Partially mitigated
+    # OBs still count toward the combo (some demand/supply remains) but carry
+    # a confidence penalty since part of the zone has already been absorbed.
+    # Fully mitigated OBs were already excluded from selection entirely.
+    for ob_used in (near_ob, near_ob_15m):
+        if ob_used is not None and ob_used.state == "partial":
+            score -= OB_PARTIAL_SCORE_PENALTY
+            combos.append(f"OB_PARTIAL_{ob_used.timeframe.upper()}")
+            print(f"    [OB PARTIAL] {symbol} {ob_used.timeframe} OB "
+                  f"{ob_used.mitigation_pct*100:.0f}% mitigated — score penalised "
+                  f"-{OB_PARTIAL_SCORE_PENALTY}")
+
+    # ── FVG Mitigation Penalty ────────────────────────────────────────────────
+    # Fresh / mostly-fresh FVGs (<50% filled) keep full combo credit. FVGs
+    # half-filled or deeper still count (the unfilled portion remains valid
+    # imbalance) but carry a confidence penalty. Nearly/fully filled FVGs
+    # were already excluded from selection in find_fvgs().
+    for fvg_used in (near_fvg, near_fvg_15m):
+        if fvg_used is not None and fvg_used.mitigation_pct >= FVG_MOSTLY_FRESH_MAX:
+            score -= FVG_PARTIAL_SCORE_PENALTY
+            combos.append(f"FVG_PARTIAL_{fvg_used.timeframe.upper()}")
+            print(f"    [FVG PARTIAL] {symbol} {fvg_used.timeframe} FVG "
+                  f"{fvg_used.mitigation_pct*100:.0f}% mitigated — score penalised "
+                  f"-{FVG_PARTIAL_SCORE_PENALTY}")
 
     if has_funding_align:
         score += 1
@@ -1669,6 +2053,19 @@ def compute_smc_signal(symbol: str,
         print(f"[{symbol}] Skipping — entry zone is zero-width or inverted")
         return None
 
+    # ── Step 6b: Opposing IFVG Entry Block (hard gate) ──────────────────────
+    # Never enter directly into an opposing, still-active IFVG — it is live
+    # institutional resistance/support sitting on top of the entry zone.
+    opposing_dir = "bear" if direction == "long" else "bull"
+    buffer_15m   = atr_15m * IFVG_BLOCK_BUFFER_ATR
+    for g in all_ifvgs:
+        if g.direction != opposing_dir or g.state == "full":
+            continue
+        if (g.gap_low - buffer_15m) <= entry_high and (g.gap_high + buffer_15m) >= entry_low:
+            print(f"  [GATE] {symbol} {direction.upper()} rejected — entry zone overlaps "
+                  f"opposing {g.timeframe} IFVG [{fmt_price(g.gap_low)}-{fmt_price(g.gap_high)}]")
+            return None
+
     # ── Step 7: Fibonacci Confluence ─────────────────────────────────────────
     NON_FIB_MIN = 4   # require at least 4 real confluence factors before fib bonus
     if score < NON_FIB_MIN:
@@ -1733,43 +2130,21 @@ def compute_smc_signal(symbol: str,
     if direction == "long":
         risk      = exact_entry - stop_loss
         tp1       = exact_entry + risk * 1.5
-        _lookback_4h = candles_4h[-40:]
-        # Prefer the nearest confirmed swing high above current price.
-        swing_highs_4h = [
-            _lookback_4h[i]["h"]
-            for i in range(len(_lookback_4h))
-            if is_swing_high(_lookback_4h, i, 2) and _lookback_4h[i]["h"] > cur_p
-        ]
-        if swing_highs_4h:
-            tp2 = min(swing_highs_4h)   # nearest (lowest) confirmed swing high above price
-        else:
-            # Fallback: nearest candle high above price; then fixed multiple.
-            highs_4h = [c["h"] for c in _lookback_4h if c["h"] > cur_p]
-            tp2 = min(highs_4h) if highs_4h else exact_entry + risk * 4.0
-        if tp2 < tp1:
-            tp2 = exact_entry + risk * 2.5
-        tp2_max = exact_entry + risk * 2.5
-        if tp2 > tp2_max:
-            tp2 = tp2_max   # cap unreachable swing highs
+        tp2_cap   = exact_entry + risk * 2.5
+        tp2, tp2_source = find_liquidity_tp2("long", tp1, tp2_cap, candles_1h, candles_4h)
+        if tp2 <= tp1 or tp2 > tp2_cap:
+            tp2 = tp2_cap
+            tp2_source = "Fixed R:R cap (no valid liquidity target above TP1)"
+        details["tp2_source"] = tp2_source
     else:
         risk      = stop_loss - exact_entry
         tp1       = exact_entry - risk * 1.5
-        _lookback_4h = candles_4h[-40:]
-        swing_lows_4h = [
-            _lookback_4h[i]["l"]
-            for i in range(len(_lookback_4h))
-            if is_swing_low(_lookback_4h, i, 2) and _lookback_4h[i]["l"] < cur_p
-        ]
-        if swing_lows_4h:
-            tp2 = max(swing_lows_4h)   # nearest (highest) confirmed swing low below price
-        else:
-            lows_4h = [c["l"] for c in _lookback_4h if c["l"] < cur_p]
-            tp2 = max(lows_4h) if lows_4h else exact_entry - risk * 4.0
-        if tp2 > tp1:
-            tp2 = exact_entry - risk * 2.5
-        tp2_max = exact_entry - risk * 2.5
-        if tp2 < tp2_max:
-            tp2 = tp2_max   # cap unreachable swing lows
+        tp2_cap   = exact_entry - risk * 2.5
+        tp2, tp2_source = find_liquidity_tp2("short", tp1, tp2_cap, candles_1h, candles_4h)
+        if tp2 >= tp1 or tp2 < tp2_cap:
+            tp2 = tp2_cap
+            tp2_source = "Fixed R:R cap (no valid liquidity target below TP1)"
+        details["tp2_source"] = tp2_source
 
     # ── Grade ────────────────────────────────────────────────────────────────
     if score >= APLUS_SIGNAL_SCORE:
@@ -1865,6 +2240,10 @@ def format_signal_message(sig: SMCSignal) -> str:
         "FVG":               "FVG (Combo 1)",
         "LIQ_SWEEP":         "Liquidity Sweep (Combo 2)",
         "15M_MSB":           "15M MSB Confirmed",
+        "CHOCH_CONFIRMED":   "CHoCH Confirmed (trend reversal)",
+        "MSS_CONFIRMED":     "MSS Confirmed (structure shift)",
+        "LIQ_POOL_STRONG":   "Liquidity Pool — Strong (3 touches)",
+        "LIQ_POOL_VERY_STRONG": "Liquidity Pool — Very Strong (4+ touches)",
         "15M_OB_FVG":        "15M OB/FVG Entry",
         "FIB_GOLDEN":        "Fib Golden Zone 0.618–0.786",
         "FIB_LEVEL":         f"Fib Level ({sig.details.get('fib_zone', '')})",
@@ -1926,7 +2305,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
-        f"\n<i>SMC Signal Engine v{VERSION} | Min confluence {get_min_confluence_score()}/{max_score}</i>\n"
+        f"\n<i>Vectis Liquidity Engine v{VERSION} | Min confluence {get_min_confluence_score()}/{max_score}</i>\n"
     )
     return msg
 
@@ -2068,7 +2447,7 @@ def run_scan(all_mids: dict | None = None) -> None:
     global _last_scan_ts, _atr_cache
     _atr_cache = {}
 
-    # ── OI / Funding batch fetch (v9) ─────────────────────────────────────────
+    # ── OI / Funding batch fetch ────────────────────────────────────────────
     # Populate _oi_funding_data once per scan run. All per-symbol workers read
     # from this dict via get_oi_funding() — zero additional API calls per symbol.
     fetch_all_oi_funding()
@@ -2834,7 +3213,7 @@ def _shutdown_handler(signum, frame):
 
 def main() -> None:
     print("=" * 60)
-    print(f"  SMC Signal Engine v{VERSION}  [single-scan mode]")
+    print(f"  Vectis Liquidity Engine v{VERSION}  [single-scan mode]")
     print("  Combos: Bundle-scored A (OB+FVG+MSB) + B (Sweep+OB+FVG)")
     print("  + Fibonacci Confluence (0.382 / 0.5 / 0.618 / 0.786)")
     print(f"  Top {TOP_N_SIGNALS} signals per scan | Reaction tracking ON")
@@ -2842,6 +3221,8 @@ def main() -> None:
     print("  MSB body/range≥55% (no doji breaks)")
     print("  ATR-relative Fib tolerance (scales with vol)")
     print("  FVG∩OB intersection entry zone (tighter entries)")
+    print("  Inverse FVG (IFVG) lifecycle + opposing-zone entry block")
+    print("  Liquidity-targeted TP2 (cluster > pool > untouched swing > swing)")
     print("  Combo-bundle scoring (A=3pts / B-partial=+2 / B=3pts)")
     print("  Manual sector BTC regime filter")
     print(f"         Block sectors: {sorted(BTC_REGIME_BLOCK_SECTORS)}")
@@ -2880,7 +3261,7 @@ def main() -> None:
         run_scan(all_mids)
     except Exception as e:
         print(f"[MAIN ERROR] {e}")
-        send_telegram_get_id(f"⚠️ SMC Engine error: {e}")  # discard the returned message_id
+        send_telegram_get_id(f"⚠️ Vectis Engine error: {e}")  # discard the returned message_id
 
     cleanup_state()
     save_state()
