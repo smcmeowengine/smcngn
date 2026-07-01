@@ -19,6 +19,25 @@ Timeframes : 1D (macro bias + ADX) → 4H (bias + premium/discount) →
              1H (liquidity sweep) → 15M (displacement + MSB entry trigger)
 Exchange   : Hyperliquid
 Alerts     : Telegram (HTML)
+
+v2 changes (per signal_engine_audit_and_ranking.md "Best Features Per
+Engine" table — cross-pollinated from the other four sibling engines while
+keeping Vectis's stricter hard-gate philosophy untouched):
+  - Session filter (London/NY) ENABLED — was built but left off; Aurelian's
+    audit flagged session-aware filtering as a legitimate, underused signal.
+  - Weekend mode ENABLED — raises the confluence bar on Sat/Sun rather than
+    subtracting from score post-hoc (Aurelius's cleaner formulation).
+  - OI-spike penalty now conditioned on PD zone, not blanket OI delta
+    (Aurelius) — a spike while already buying discount / selling premium is
+    exempted, since range positioning corroborates the flow direction.
+  - TP3 extended liquidity-target ladder added (Aurelian/Aurelius) — trade
+    management no longer stops at TP2; a further-out pool/swing (or a fixed
+    4.5R fallback) is tracked as a runner target once TP2 banks.
+  - MAX_SAME_DIRECTION already matched Axiom's tighter default (2); no
+    change needed there.
+  - Not pulled: Aurelian's OR-style sweep/PD softening and Axiom's
+    compressed 0-100 confidence scale were explicitly identified as
+    regressions relative to Vectis's stricter gates and were left out.
 """
 
 import os, time, math, threading, requests, random, json, pathlib, sys
@@ -37,7 +56,7 @@ if not TG_CHAT_ID:
 
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # ── WATCHLIST ─────────────────────────────────────────────────────────────────
 WATCHLIST = [
@@ -57,7 +76,12 @@ N_1D            = 60        # 60 daily candles (~2 months) — plenty for bias
 
 # ── SESSION FILTER (High priority upgrade) ────────────────────────────────────
 # Only trade during London (07:00–12:00 UTC) and New York (13:00–20:00 UTC)
-SESSION_FILTER_ENABLED = False  # disabled: engine runs 24/7 every 15 min
+# v2: ENABLED. Aurelian's audit showed session-aware filtering (London/NY
+# overlap liquidity) is a legitimate, underused SMC concept; this was built
+# in Vectis but left switched off. Turning it on trades some frequency for
+# quality — liquidity outside these windows is thinner and sweeps/BOS are
+# less reliable. Flip back to False to run 24/7 if live data disagrees.
+SESSION_FILTER_ENABLED = True
 LONDON_OPEN_H  = 7
 LONDON_CLOSE_H = 12
 NY_OPEN_H      = 13
@@ -142,7 +166,9 @@ SWEEP_MULTIBAR_LOOKBACK   = 3   # check last 3 bars for sweep confirmation
 # Weekend mode raises MIN_CONFLUENCE_SCORE by 1 to compensate — fewer signals
 # but only the cleanest ones pass. Set to False to disable and use the same
 # thresholds 7 days a week.
-WEEKEND_MODE_ENABLED = False
+# v2: ENABLED — raising the bar (not subtracting from score post-hoc) is the
+# cleaner formulation Aurelius uses for the same idea.
+WEEKEND_MODE_ENABLED = True
 WEEKEND_MIN_CONFLUENCE_SCORE = 7   # 1 above MIN_CONFLUENCE_SCORE — tighter on weekends
 
 # ── WIN RATE MEMORY (Later upgrade) ──────────────────────────────────────────
@@ -270,11 +296,11 @@ APLUS_SIGNAL_SCORE    = 8   # A+ grade — requires near-perfect stack — a GRA
 # Sum of every individual bonus a single signal can realistically stack:
 #   PD_ALIGN(1) + Combo A(3) + Combo B(3) + IFVG_ALIGN(1) + FUNDING_ALIGN(1)
 #   + ADX_TREND(1) + FIB_GOLDEN(2) + VOL_STRONG(2) + LIQ_POOL_VERY_STRONG(2)
-#   + MSS_CONFIRMED(2)
+#   + MSS_CONFIRMED(2) + MSS_1H_MERIDIAN(1)
 # Used only as the "/N" denominator in Telegram messages so the displayed
 # ratio can never read as a malformed "11/8" once IFVG/structure/pool bonuses
 # are firing together. Recompute this if a new bonus source is ever added.
-THEORETICAL_MAX_SCORE = 1 + 3 + 3 + 1 + 1 + 1 + 2 + 2 + 2 + 2   # = 18
+THEORETICAL_MAX_SCORE = 1 + 3 + 3 + 1 + 1 + 1 + 2 + 2 + 2 + 2 + 1   # = 19
 
 # ── INTERVAL MAP ─────────────────────────────────────────────────────────────
 INTERVAL_MS = {
@@ -393,6 +419,8 @@ class SMCSignal:
     funding_rate:    float | None = None   # per-8h funding at signal time
     oi_usd:          float | None = None   # open interest in USD at signal time
     timestamp:       str = ""
+    take_profit_3:   float | None = None   # TP3 — extended liquidity target (Aurelian/Aurelius)
+    tp3_source:      str = ""
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1249,6 +1277,124 @@ def find_inverse_fvgs(candles: list[dict], timeframe: str, atr: float) -> list[I
 
 
 
+# ── MERIDIAN-STYLE STRUCTURE EVENTS (v2 port) ─────────────────────────────────
+# Vectis's own detect_market_structure() below is a single-scale, single-break
+# classifier used as the 15M HARD GATE and is left untouched — it's what
+# decides whether a signal is even eligible.
+#
+# This block ports Meridian's genuinely different structure model as an
+# ADDITIVE confluence layer, not a replacement gate (per the audit's v2
+# recipe: Vectis's gate philosophy stays authoritative; Meridian supplies the
+# structure-detection primitive on top). Two things Meridian does that
+# Vectis's single-scale classifier doesn't:
+#   1. Two swing scales — "external" (major, 5-bar pivots) for HTF bias vs.
+#      "internal" (minor, 2-bar pivots) for lower-timeframe confirmation —
+#      rather than one swing width reused everywhere.
+#   2. TEMPORAL CHoCH→MSS promotion: a CHoCH is only promoted to MSS once a
+#      later, same-direction BOS confirms it within a bar window (i.e. the
+#      new trend takes out its own prior swing — genuine follow-through).
+#      This is the standard SMC definition of MSS. Vectis's own classifier
+#      instead promotes MSS if the *same* break candle clears an older
+#      opposite-trend level — a single-candle approximation, not a
+#      confirmed-over-time follow-through. Both are legitimate signals; they
+#      are complementary, not duplicative, so both are scored.
+SWING_LEN_EXTERNAL   = 5     # bars either side for a "major" external swing pivot
+SWING_LEN_INTERNAL   = 2     # bars either side for a "minor" internal swing pivot
+MSS_PROMOTION_WINDOW = 15    # bars within which a same-direction BOS promotes a CHoCH to MSS
+
+@dataclass
+class SwingPoint:
+    index: int
+    price: float
+    kind:  str          # "high" | "low"
+    scale: str          # "external" | "internal"
+
+@dataclass
+class StructureEvent:
+    kind:      str       # "BOS" | "CHoCH" | "MSS"
+    direction: str       # "bull" | "bear"
+    index:     int
+    level:     float
+    scale:     str       # "external" | "internal"
+
+def find_swings(candles: list[dict], scale: str = "external") -> list[SwingPoint]:
+    n = SWING_LEN_EXTERNAL if scale == "external" else SWING_LEN_INTERNAL
+    swings = []
+    for i in range(n, len(candles) - n):
+        window = candles[i-n:i+n+1]
+        hi, lo = candles[i]["h"], candles[i]["l"]
+        if hi == max(c["h"] for c in window):
+            swings.append(SwingPoint(i, hi, "high", scale))
+        if lo == min(c["l"] for c in window):
+            swings.append(SwingPoint(i, lo, "low", scale))
+    return swings
+
+def _meridian_body_ratio(c: dict) -> float:
+    rng = c["h"] - c["l"]
+    return abs(c["c"] - c["o"]) / rng if rng > 0 else 0.0
+
+def detect_structure_events(candles: list[dict], swings: list[SwingPoint], scale: str) -> list[StructureEvent]:
+    """
+    Walks candle closes chronologically against the most recent confirmed
+    swing high/low, tracking the prevailing trend.
+      BOS   : break of a swing in the direction of the existing trend (continuation)
+      CHoCH : first break against the prevailing trend (early reversal signal)
+      MSS   : a CHoCH subsequently confirmed by a later same-direction BOS
+              within MSS_PROMOTION_WINDOW bars — genuine follow-through,
+              not just a same-candle double-break.
+    """
+    events: list[StructureEvent] = []
+    highs = sorted([s for s in swings if s.kind == "high"], key=lambda s: s.index)
+    lows  = sorted([s for s in swings if s.kind == "low"],  key=lambda s: s.index)
+    if not highs or not lows:
+        return events
+
+    trend = None
+    cur_high_i = cur_low_i = 0
+    active_high = active_low = None
+
+    for i in range(len(candles)):
+        while cur_high_i < len(highs) and highs[cur_high_i].index < i:
+            active_high = highs[cur_high_i]
+            cur_high_i += 1
+        while cur_low_i < len(lows) and lows[cur_low_i].index < i:
+            active_low = lows[cur_low_i]
+            cur_low_i += 1
+        c = candles[i]
+        if active_high and c["c"] > active_high.price and _meridian_body_ratio(c) >= 0.35:
+            kind = "CHoCH" if trend == "bear" else "BOS"
+            events.append(StructureEvent(kind, "bull", i, active_high.price, scale))
+            trend = "bull"
+            active_high = None
+        if active_low and c["c"] < active_low.price and _meridian_body_ratio(c) >= 0.35:
+            kind = "CHoCH" if trend == "bull" else "BOS"
+            events.append(StructureEvent(kind, "bear", i, active_low.price, scale))
+            trend = "bear"
+            active_low = None
+
+    # Promote a CHoCH to MSS when a same-direction BOS confirms it within the window.
+    for j, ev in enumerate(events):
+        if ev.kind == "CHoCH":
+            for later in events[j+1:]:
+                if later.index - ev.index > MSS_PROMOTION_WINDOW:
+                    break
+                if later.kind == "BOS" and later.direction == ev.direction:
+                    ev.kind = "MSS"
+                    break
+    return events
+
+def external_structure_bias(candles: list[dict]) -> tuple[str, list[StructureEvent]]:
+    swings = find_swings(candles, "external")
+    events = detect_structure_events(candles, swings, "external")
+    if not events:
+        return "neutral", events
+    return events[-1].direction, events
+
+def internal_structure_events(candles: list[dict]) -> list[StructureEvent]:
+    swings = find_swings(candles, "internal")
+    return detect_structure_events(candles, swings, "internal")
+
+
 def detect_market_structure(candles: list[dict], direction: str) -> dict | None:
     """
     Institutional market structure classifier: BOS / CHoCH / MSS.
@@ -1456,6 +1602,46 @@ def find_liquidity_tp2(direction: str, tp1: float, tp2_cap: float,
         return pick_nearest(candle_extremes), "Nearest candle extreme"
 
     return tp2_cap, "Fixed R:R cap (no liquidity target found)"
+
+
+def find_liquidity_tp3(direction: str, tp2: float, entry: float, risk: float,
+                        candles_1h: list[dict], candles_4h: list[dict]) -> tuple[float, str]:
+    """
+    TP3 — extended liquidity target beyond TP2 (from Aurelian/Aurelius's
+    trade-management surface: TP1/TP2-only leaves winners on the table when a
+    setup runs into a second, further-out liquidity pool). Searches the same
+    pool/swing hierarchy as find_liquidity_tp2() but restricted to levels
+    strictly beyond TP2, uncapped (TP3 is a "let it run" target, not a
+    guaranteed fill). Falls back to a fixed 4.5R extension if nothing is
+    found beyond TP2, matching Aurelius's fallback multiple.
+    """
+    pool_side  = "short" if direction == "long" else "long"
+    sweep_side = "high"  if direction == "long" else "low"
+    lookback_4h = candles_4h[-40:]
+    beyond = (lambda p: p > tp2) if direction == "long" else (lambda p: p < tp2)
+    pick_nearest = min if direction == "long" else max
+    fallback = entry + risk * 4.5 if direction == "long" else entry - risk * 4.5
+
+    pools = [p for p in find_equal_levels(candles_1h, pool_side)
+             if beyond(p["price"]) and not _level_is_swept(candles_1h, p["price"], sweep_side)]
+    if pools:
+        best = pick_nearest(pools, key=lambda p: p["price"])
+        return best["price"], f"Liquidity pool beyond TP2 ({best['strength']}, {best['touches']} touches)"
+
+    swing_fn = is_swing_high if direction == "long" else is_swing_low
+    key      = "h" if direction == "long" else "l"
+    swing_idxs = [i for i in range(len(lookback_4h))
+                  if swing_fn(lookback_4h, i, 2) and beyond(lookback_4h[i][key])]
+    untouched = [lookback_4h[i][key] for i in swing_idxs
+                 if _is_untouched_swing(lookback_4h[i][key], lookback_4h, i, sweep_side)]
+    if untouched:
+        return pick_nearest(untouched), f"Untouched swing {sweep_side} beyond TP2"
+
+    all_swings = [lookback_4h[i][key] for i in swing_idxs]
+    if all_swings:
+        return pick_nearest(all_swings), f"Swing {sweep_side} beyond TP2"
+
+    return fallback, "Fixed 4.5R extension (no liquidity target beyond TP2)"
 
 
 def detect_liquidity_sweep(candles_1h: list[dict], direction: str) -> dict | None:
@@ -1829,12 +2015,18 @@ def compute_smc_signal(symbol: str,
     details["liquidity_pool"] = {"touches": sweep["pool_touches"],
                                   "strength": sweep["pool_strength"]}
 
-    # ── Step 4b: OI Spike Block ───────────────────────────────────────────────
+    # ── Step 4b: OI Spike Block (PD-zone conditioned) ───────────────────────
     # When a liquidity sweep is detected, check whether OI is spiking.
-    # Rising OI is directionally ambiguous (new longs AND new shorts both raise OI),
-    # so a hard block based on raw OI delta was built on a flawed premise.
-    # A -2 penalty still suppresses weak setups while letting genuine A-grade
-    # setups survive. Revisit after 3–4 weeks of OI_SPIKE_WARN log data.
+    # Rising OI is directionally ambiguous on its own (new longs AND new
+    # shorts both raise OI) — a blanket delta-based block/penalty punishes
+    # setups regardless of *where* price is in the range. Aurelius's audit
+    # flagged a more precise formulation: only treat the spike as adverse
+    # ("counter-flow") when it's happening somewhere that doesn't already
+    # explain fresh positioning in our favour — i.e. an OI spike while we're
+    # buying discount (or selling premium) is far less concerning than the
+    # same spike away from those zones, since discount/premium positioning
+    # is itself evidence of the flow direction we want. This keeps the
+    # penalty targeted instead of blanket.
     if has_sweep and oi_data and OI_FUNDING_ENABLED:
         oi_now  = oi_data.get("open_interest", 0.0)
         oi_prev = oi_data.get("prev_oi")
@@ -1842,12 +2034,26 @@ def compute_smc_signal(symbol: str,
             oi_delta_pct = (oi_now - oi_prev) / oi_prev
             details["oi_delta_pct"] = round(oi_delta_pct * 100, 2)
             if oi_delta_pct > OI_SPIKE_BLOCK_PCT:
-                score -= 2
-                combos.append("OI_SPIKE_WARN")
-                details["oi_spike"] = True
-                print(f"  [OI SPIKE WARN] {symbol} {direction.upper()} — "
-                      f"OI spiked +{oi_delta_pct*100:.2f}% during sweep, "
-                      f"score penalised -2 (threshold +{OI_SPIKE_BLOCK_PCT*100:.0f}%)")
+                # Counter-flow: OI spiking while PD posture is NOT already the
+                # favourable one for this direction (discount for longs,
+                # premium for shorts) — the spike isn't corroborated by range
+                # positioning, so it's more likely fresh opposing size.
+                counter_flow = (direction == "long" and pd["zone"] != "discount") or \
+                               (direction == "short" and pd["zone"] != "premium")
+                if counter_flow:
+                    score -= 2
+                    combos.append("OI_SPIKE_WARN")
+                    details["oi_spike"] = True
+                    print(f"  [OI SPIKE WARN] {symbol} {direction.upper()} — "
+                          f"OI spiked +{oi_delta_pct*100:.2f}% during sweep outside "
+                          f"favourable PD zone ({pd['zone']}), score penalised -2 "
+                          f"(threshold +{OI_SPIKE_BLOCK_PCT*100:.0f}%)")
+                else:
+                    combos.append("OI_SPIKE_PD_EXEMPT")
+                    details["oi_spike"] = False
+                    print(f"    [OI] {symbol} OI spiked +{oi_delta_pct*100:.2f}% but "
+                          f"PD zone ({pd['zone']}) is favourable for {direction} — "
+                          f"penalty exempted (Aurelius-style PD conditioning)")
             else:
                 print(f"    [OI] {symbol} OI delta {oi_delta_pct*100:+.2f}% "
                       f"— no spike detected (threshold +{OI_SPIKE_BLOCK_PCT*100:.0f}%)")
@@ -1887,6 +2093,21 @@ def compute_smc_signal(symbol: str,
     elif structure["type"] == "MSS":
         score += structure["score_bonus"]
         combos.append("MSS_CONFIRMED")
+
+    # ── Step 5b: Meridian-style 1H internal MSS confluence (additive bonus) ──
+    # Separate from the 15M hard gate above: checks whether the 1H internal
+    # structure shows a *temporally confirmed* MSS (CHoCH followed by a later
+    # same-direction BOS — genuine follow-through) aligned with our direction.
+    # This is complementary evidence, not a duplicate of the 15M gate — it's
+    # measuring confirmation on a different timeframe with a different
+    # promotion rule, so it earns its own point rather than being folded in.
+    internal_1h_events = internal_structure_events(candles_1h)
+    want_dir = "bull" if direction == "long" else "bear"
+    recent_1h_mss = [e for e in internal_1h_events[-8:] if e.kind == "MSS" and e.direction == want_dir]
+    if recent_1h_mss:
+        score += 1
+        combos.append("MSS_1H_MERIDIAN")
+        details["mss_1h_confirmed"] = True
 
     # ── Step 6: 15M OB / FVG ────────────────────────────────────────────────
     obs_15m  = find_order_blocks(candles_15m, "15m", atr_15m, bias)
@@ -2168,6 +2389,10 @@ def compute_smc_signal(symbol: str,
             tp2_source = "Fixed R:R cap (no valid liquidity target below TP1)"
         details["tp2_source"] = tp2_source
 
+    # ── Take Profit 3 (extended target, Aurelian/Aurelius) ───────────────────
+    tp3, tp3_source = find_liquidity_tp3(direction, tp2, exact_entry, risk, candles_1h, candles_4h)
+    details["tp3_source"] = tp3_source
+
     # ── Grade ────────────────────────────────────────────────────────────────
     if score >= APLUS_SIGNAL_SCORE:
         grade = "A+"
@@ -2220,6 +2445,8 @@ def compute_smc_signal(symbol: str,
         stop_loss=stop_loss,
         take_profit_1=tp1,
         take_profit_2=tp2,
+        take_profit_3=tp3,
+        tp3_source=tp3_source,
         confluence=score,
         signal_grade=grade,
         combos_hit=combos,
@@ -2264,6 +2491,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         "15M_MSB":           "15M MSB Confirmed",
         "CHOCH_CONFIRMED":   "CHoCH Confirmed (trend reversal)",
         "MSS_CONFIRMED":     "MSS Confirmed (structure shift)",
+        "MSS_1H_MERIDIAN":   "1H MSS — temporal confirmation (Meridian)",
         "LIQ_POOL_STRONG":   "Liquidity Pool — Strong (3 touches)",
         "LIQ_POOL_VERY_STRONG": "Liquidity Pool — Very Strong (4+ touches)",
         "15M_OB_FVG":        "15M OB/FVG Entry",
@@ -2304,6 +2532,10 @@ def format_signal_message(sig: SMCSignal) -> str:
 
     rr1 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_1, sig.direction)
     rr2 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_2, sig.direction)
+    tp3_line = ""
+    if sig.take_profit_3 is not None:
+        rr3 = fmt_rr(sig.exact_entry, sig.stop_loss, sig.take_profit_3, sig.direction)
+        tp3_line = f"<b>TP3:</b>        <code>{fmt_price(sig.take_profit_3)}</code>  ({rr3}) — let it run\n"
 
     cur_price = sig.details.get("current_price")
     dist_pct  = sig.details.get("entry_dist_pct")
@@ -2325,6 +2557,7 @@ def format_signal_message(sig: SMCSignal) -> str:
         f"\n<b>Stop Loss:</b>  <code>{fmt_price(sig.stop_loss)}</code>\n"
         f"<b>TP1:</b>        <code>{fmt_price(sig.take_profit_1)}</code>  ({rr1})\n"
         f"<b>TP2:</b>        <code>{fmt_price(sig.take_profit_2)}</code>  ({rr2})\n"
+        f"{tp3_line}"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fib_section}"
         f"\n<i>Vectis Liquidity Engine v{VERSION} | Min confluence {get_min_confluence_score()}/{max_score}</i>\n"
@@ -2811,11 +3044,13 @@ def track_active_signal(sig: SMCSignal, message_id: int) -> None:
         "stop_loss":       sig.stop_loss,
         "take_profit_1":   sig.take_profit_1,
         "take_profit_2":   sig.take_profit_2,
+        "take_profit_3":   sig.take_profit_3,
         "combos_hit":      sig.combos_hit,
         "message_id":      message_id,
         "signal_grade":    sig.signal_grade,
         "entered":         False,
         "tp1_hit":         False,
+        "tp2_hit":         False,
         "resolved":        False,
         "sent_at":         time.time(),
     }
@@ -2868,6 +3103,7 @@ def check_reactions(all_mids: dict) -> None:
         sl          = s["stop_loss"]
         tp1         = s["take_profit_1"]
         tp2         = s["take_profit_2"]
+        tp3         = s.get("take_profit_3")
         msg_id      = s["message_id"]
 
         # calls/scan with a full watchlist of active signals). Use the already-
@@ -2942,20 +3178,44 @@ def check_reactions(all_mids: dict) -> None:
             sl_hit  = bar_low  <= sl
             tp1_hit = bar_high >= tp1
             tp2_hit = bar_high >= tp2
+            tp3_hit = tp3 is not None and bar_high >= tp3
         else:
             sl_hit  = bar_high >= sl
             tp1_hit = bar_low  <= tp1
             tp2_hit = bar_low  <= tp2
+            tp3_hit = tp3 is not None and bar_low  <= tp3
+
+        # ── TP3 runner (Aurelian/Aurelius extended target) ───────────────────
+        # Once TP2 has already banked, keep the signal open (don't resolve) so
+        # a further move to TP3 can be recorded as an upgraded win. SL/TTL
+        # after TP2 still resolves as a TP2 win — the TP2 profit is locked in
+        # either way, TP3 is pure upside tracking, not a fresh risk.
+        if s["tp2_hit"]:
+            if tp3_hit:
+                react_to_message(msg_id, "🚀")   # runner hit TP3
+                record_outcome(s["symbol"], s.get("combos_hit", []), "tp3")
+                _fired_signals.pop(key, None)
+                s["resolved"] = True
+                to_drop.append(key)
+            elif sl_hit:
+                # Trailing/SL after TP2 — TP2 profit already banked, no new loss.
+                s["resolved"] = True
+                to_drop.append(key)
+            continue
 
         # Priority: if both TP2 and SL are inside the same bar range,
         # we favour TP2 (price had to pass through TP2 to reach SL on the way back).
         if tp2_hit:
             s["tp1_hit"] = True
+            s["tp2_hit"] = True
             react_to_message(msg_id, "🏆")   # full winner shows only 🏆, even if 🔥 was sent earlier
             record_outcome(s["symbol"], s.get("combos_hit", []), "win")
             _fired_signals.pop(key, None)   # clear cooldown on win; allow re-entry after resolution
-            s["resolved"] = True
-            to_drop.append(key)
+            if tp3 is None:
+                s["resolved"] = True
+                to_drop.append(key)
+            # else: keep tracking as a TP3 runner (handled by the block above
+            # on the next scan pass).
 
         elif sl_hit and tp1_hit and not s["tp1_hit"]:
             # Both SL and TP1 touched in same bar — favour TP1 hit first
@@ -3034,6 +3294,7 @@ def save_win_rate() -> None:
 def record_outcome(symbol: str, combos: list, outcome: str) -> None:
     """
     outcome: "win"          (TP2 hit)
+             "tp3"          (TP3 hit after TP2 already banked — extended runner win)
              "tp1"          (TP1 hit, not TP2 — trade still running or closed at TP1)
              "tp1_then_loss" (TP1 hit, then SL hit on residual)
              "loss"         (SL hit after entry, TP1 never reached)
@@ -3052,6 +3313,9 @@ def record_outcome(symbol: str, combos: list, outcome: str) -> None:
             entry["losses"] += 1
         elif outcome == "tp1":
             entry["tp1s"] += 1
+        elif outcome == "tp3":
+            entry.setdefault("tp3s", 0)
+            entry["tp3s"] += 1
         elif outcome == "tp1_then_loss":
             entry.setdefault("tp1_then_loss", 0)
             entry["tp1_then_loss"] += 1
