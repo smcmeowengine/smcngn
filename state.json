@@ -1,1 +1,188 @@
-{}
+{
+  "active_signals": [
+    {
+      "symbol": "BTC",
+      "direction": "long",
+      "pathway": "momentum_breakout",
+      "combo": "intraday",
+      "entry": 63258.0,
+      "sl": 62237.612850502366,
+      "tp1": 64254.0,
+      "tp2": 65587.0,
+      "confidence": 92.26,
+      "grade": "A+",
+      "ts": 1783189431,
+      "bar_index": 1981320,
+      "result": "open"
+    },
+    {
+      "symbol": "BNB",
+      "direction": "long",
+      "pathway": "momentum_breakout",
+      "combo": "intraday",
+      "entry": 578.17,
+      "sl": 567.6324941785207,
+      "tp1": 592.48,
+      "tp2": 602.0,
+      "confidence": 85.16,
+      "grade": "A+",
+      "ts": 1783189451,
+      "bar_index": 1981320,
+      "result": "open"
+    },
+    {
+      "symbol": "AAVE",
+      "direction": "long",
+      "pathway": "momentum_breakout",
+      "combo": "intraday",
+      "entry": 90.325,
+      "sl": 86.6963295163145,
+      "tp1": 95.318,
+      "tp2": 99.255,
+      "confidence": 93.86,
+      "grade": "A+",
+      "ts": 1783189476,
+      "bar_index": 1981320,
+      "result": "open"
+    }
+  ],
+  "signal_history": [
+    {
+      "symbol": "BTC",
+      "direction": "long",
+      "pathway": "momentum_breakout",
+      "combo": "intraday",
+      "entry": 63258.0,
+      "sl": 62237.612850502366,
+      "tp1": 64254.0,
+      "tp2": 65587.0,
+      "confidence": 92.26,
+      "grade": "A+",
+      "ts": 1783189431,
+      "bar_index": 1981320,
+      "result": "open"
+    },
+    {
+      "symbol": "BNB",
+      "direction": "long",
+      "pathway": "momentum_breakout",
+      "combo": "intraday",
+      "entry": 578.17,
+      "sl": 567.6324941785207,
+      "tp1": 592.48,
+      "tp2": 602.0,
+      "confidence": 85.16,
+      "grade": "A+",
+      "ts": 1783189451,
+      "bar_index": 1981320,
+      "result": "open"
+    },
+    {
+      "symbol": "AAVE",
+      "direction": "long",
+      "pathway": "momentum_breakout",
+      "combo": "intraday",
+      "entry": 90.325,
+      "sl": 86.6963295163145,
+      "tp1": 95.318,
+      "tp2": 99.255,
+      "confidence": 93.86,
+      "grade": "A+",
+      "ts": 1783189476,
+      "bar_index": 1981320,
+      "result": "open"
+    }
+  ],
+  "cooldowns": {
+    "BTC:long": 1981320,
+    "BNB:long": 1981320,
+    "AAVE:long": 1981320
+  },
+  "atr_pct_memory": {
+    "BTC": [
+      0.01160622104088827
+    ],
+    "ETH": [
+      0.01570520368499844
+    ],
+    "HYPE": [
+      0.023172474260263837
+    ],
+    "ZEC": [
+      0.028631040428732005
+    ],
+    "NEAR": [
+      0.027757533789258194
+    ],
+    "ONDO": [
+      0.02057890761560389
+    ],
+    "SUI": [
+      0.019577504119973888
+    ],
+    "PENGU": [
+      0.028340357647656616
+    ],
+    "BNB": [
+      0.011528567923335422
+    ],
+    "SOL": [
+      0.019365919436294177
+    ],
+    "TRX": [
+      0.004955019105148441
+    ],
+    "BCH": [
+      0.021797003746933014
+    ],
+    "DOGE": [
+      0.016993870250916577
+    ],
+    "ADA": [
+      0.027665540888817144
+    ],
+    "DOT": [
+      0.01781017994734126
+    ],
+    "TAO": [
+      0.021207431667139173
+    ],
+    "AVAX": [
+      0.017022527432778645
+    ],
+    "LINK": [
+      0.016003340615224453
+    ],
+    "AAVE": [
+      0.02617577039261334
+    ],
+    "XRP": [
+      0.01661632265414077
+    ],
+    "XLM": [
+      0.02830167610755357
+    ],
+    "UNI": [
+      0.02424819269395301
+    ],
+    "LTC": [
+      0.01633700768451531
+    ],
+    "APT": [
+      0.020909227585423358
+    ],
+    "PENDLE": [
+      0.026625547298886502
+    ]
+  },
+  "governor": {
+    "threshold": 66.0,
+    "last_adjust_ts": 0,
+    "daily_count_ema": 5.7
+  },
+  "corr_returns": {},
+  "meta": {
+    "version": "2.0.0",
+    "created": 1783189426
+  }
+}
