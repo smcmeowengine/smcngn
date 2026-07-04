@@ -1528,12 +1528,19 @@ def generate_daily_summary(state: dict) -> str:
     return "\n".join(lines)
 
 
+DAILY_SUMMARY_UTC_HOUR = 8  # send once per day, only in the scan(s) that land in this UTC hour
+
+
 def maybe_send_daily_summary(state: dict):
-    last = state.get("last_summary_ts", 0)
-    if time.time() - last < 86400:
+    now = time.gmtime()
+    today_str = time.strftime("%Y-%m-%d", now)
+    if now.tm_hour != DAILY_SUMMARY_UTC_HOUR:
         return
+    if state.get("last_summary_date") == today_str:
+        return  # already sent today (scan runs every 15min, so this hour fires 4x)
     summary = generate_daily_summary(state)
     send_telegram(summary)
+    state["last_summary_date"] = today_str
     state["last_summary_ts"] = int(time.time())
 
 
