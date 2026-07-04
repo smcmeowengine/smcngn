@@ -42,10 +42,12 @@ import math
 import os
 import signal
 import statistics
+import threading
 import time
 import logging
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -109,8 +111,17 @@ COOLDOWN_BARS = 6
 DEDUP_PRICE_TOL_PCT = 0.0025
 DEDUP_TIME_WINDOW_HOURS = 48
 
-POI_ATR_MULT = {"scalp": 0.75, "intraday": 1.0, "swing": 1.25}
-POI_MAX_PCT_OF_PRICE = 0.02
+POI_ATR_MULT = {"scalp": 0.5, "intraday": 0.65, "swing": 0.85}
+POI_MAX_PCT_OF_PRICE = 0.008
+
+# --- Network performance / rate-limit handling ------------------------------
+# Hyperliquid's public info endpoint rate-limits bursts; fetching 5
+# timeframes x 25 symbols serially was the main source of both the 429s and
+# the >60s scan time. A shared token-bucket-style pacer caps request rate
+# across all threads, and a bounded thread pool fetches symbols concurrently
+# so wall-clock time is dominated by the slowest single request, not the sum.
+HL_MAX_REQUESTS_PER_SECOND = 8.0
+FETCH_THREAD_WORKERS = 6
 
 # Trend-continuation pathway tuning
 TREND_ADX_MIN = 20.0
@@ -158,18 +169,50 @@ def hl_coin(symbol: str) -> str:
     return symbol.upper()
 
 
-def hl_post(payload: dict, retries: int = 3, timeout: int = 12) -> dict | list | None:
+class _RateLimiter:
+    """Minimum-interval pacer shared across all threads so concurrent
+    fetches don't burst past Hyperliquid's rate limit."""
+
+    def __init__(self, max_per_second: float):
+        self.min_interval = 1.0 / max_per_second
+        self.lock = threading.Lock()
+        self.last_call = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            elapsed = now - self.last_call
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self.last_call = time.monotonic()
+
+
+_rate_limiter = _RateLimiter(HL_MAX_REQUESTS_PER_SECOND)
+
+
+def hl_post(payload: dict, retries: int = 4, timeout: int = 12) -> dict | list | None:
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         HL_API_URL, data=body, headers={"Content-Type": "application/json"}
     )
     for attempt in range(retries):
+        _rate_limiter.wait()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as e:
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                retry_after = e.headers.get("Retry-After")
+                wait_s = float(retry_after) if retry_after else min(8.0, 0.8 * (2 ** attempt))
+                log.warning("hl_post 429 (attempt %d, type=%s), backing off %.1fs",
+                            attempt + 1, payload.get("type"), wait_s)
+                time.sleep(wait_s)
+            else:
+                log.warning("hl_post HTTP error attempt %d (%s): %s", attempt + 1, payload.get("type"), e)
+                time.sleep(0.8 * (attempt + 1))
+        except (urllib.error.URLError, TimeoutError, ValueError) as e:
             log.warning("hl_post attempt %d failed (%s): %s", attempt + 1, payload.get("type"), e)
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(0.8 * (attempt + 1))
     log.error("hl_post exhausted retries for type=%s", payload.get("type"))
     return None
 
@@ -444,6 +487,7 @@ def _default_state() -> dict:
         "atr_pct_memory": {},
         "governor": {"threshold": 66.0, "last_adjust_ts": 0, "daily_count_ema": 6.0},
         "corr_returns": {},
+        "last_summary_ts": 0,
         "meta": {"version": "2.0.0", "created": int(time.time())},
     }
 
@@ -784,6 +828,53 @@ class Candidate:
         return safe(reward / risk, 0.0) if risk else 0.0
 
 
+def adaptive_sl_buffer(candles: list[dict], atr_val: float, vol_pctile: float,
+                        lookback: int = 20) -> float:
+    """Sizes the stop buffer beyond invalidation structure from *observed*
+    recent wick behavior rather than a flat ATR fraction -- the idea a
+    discretionary trader applies when they say 'give it room for the wick.'
+    Looks at how far recent candles have actually overshot their own
+    bodies, floors the buffer at a sane ATR fraction, widens it further
+    when the symbol is currently in an elevated-volatility percentile (more
+    prone to stop-hunt wicks), and caps it so one abnormal spike can't blow
+    the risk budget out."""
+    window = candles[-lookback:]
+    if len(window) < 5:
+        base = atr_val * 0.35
+    else:
+        wicks = []
+        for c in window:
+            body_top, body_bot = max(c["o"], c["c"]), min(c["o"], c["c"])
+            wicks.append(max(c["h"] - body_top, body_bot - c["l"]))
+        avg_wick = sum(wicks) / len(wicks)
+        base = max(atr_val * 0.3, avg_wick * 1.3)
+    vol_scale = 1.0 + 0.5 * max(0.0, vol_pctile - 0.5)  # up to 1.25x when vol_pctile -> 1.0
+    return min(base * vol_scale, atr_val * 1.1)
+
+
+def clamp_candidate_to_market(cand: "Candidate", market_price: float) -> "Candidate":
+    """Keeps the entry from drifting too far from the live tradable price
+    (the complaint that a 'signal' with an entry 2% away isn't really
+    actionable). Rather than just rejecting far-entry setups outright, this
+    parallel-shifts entry/SL/TP1/TP2 by the same amount so the R:R and
+    structure relationships are preserved exactly -- only the anchor point
+    moves closer to where price actually is."""
+    if market_price <= 0:
+        return cand
+    max_dist = min(cand.atr_val * POI_ATR_MULT.get(cand.combo_name, 0.65),
+                    market_price * POI_MAX_PCT_OF_PRICE)
+    dist = cand.entry - market_price
+    if abs(dist) <= max_dist:
+        return cand
+    target_dist = max_dist if dist > 0 else -max_dist
+    shift = target_dist - dist
+    cand.entry += shift
+    cand.sl += shift
+    cand.tp1 += shift
+    cand.tp2 += shift
+    return cand
+
+
 def _clip_tp_to_liquidity(entry: float, tp: float, direction: str, pools: dict) -> float:
     targets = pools["resistance"] if direction == "long" else pools["support"]
     if not targets:
@@ -831,7 +922,7 @@ def build_pathway_liquidity_reversal(symbol: str, bundle: dict, combo_name: str,
         breaker = next((z for z in reversed(obs) if z.kind == wanted_kind and z.untested), None)
 
         entry = breaker.mid() if breaker else exec_candles[-1]["c"]
-        sl_buf = atr_val * 0.35
+        sl_buf = adaptive_sl_buffer(struct_candles, atr_val, regime.vol_pctile)
         if direction == "long":
             sl = min(sweep["candle"]["l"], (breaker.low if breaker else entry)) - sl_buf
             raw_tp1 = entry + (entry - sl) * 1.5
@@ -903,12 +994,12 @@ def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
 
     if direction == "long":
         recent_low = min(c["l"] for c in exec_candles[-8:])
-        sl = recent_low - atr_val * 0.4
+        sl = recent_low - adaptive_sl_buffer(exec_candles, atr_val, regime.vol_pctile)
         raw_tp1 = entry + (entry - sl) * 1.5
         raw_tp2 = entry + (entry - sl) * 2.5
     else:
         recent_high = max(c["h"] for c in exec_candles[-8:])
-        sl = recent_high + atr_val * 0.4
+        sl = recent_high + adaptive_sl_buffer(exec_candles, atr_val, regime.vol_pctile)
         raw_tp1 = entry - (sl - entry) * 1.5
         raw_tp2 = entry - (sl - entry) * 2.5
 
@@ -965,12 +1056,13 @@ def build_pathway_momentum_breakout(symbol: str, bundle: dict, combo_name: str,
 
     atr_val = ind["atr"][-1]
     entry = last["c"]
+    sl_buf = adaptive_sl_buffer(struct_candles, atr_val, regime.vol_pctile)
     if direction == "long":
-        sl = lo - atr_val * 0.3
+        sl = lo - sl_buf
         raw_tp1 = entry + (entry - sl) * 1.4
         raw_tp2 = entry + (entry - sl) * 2.4
     else:
-        sl = hi + atr_val * 0.3
+        sl = hi + sl_buf
         raw_tp1 = entry - (sl - entry) * 1.4
         raw_tp2 = entry - (sl - entry) * 2.4
 
@@ -1262,20 +1354,116 @@ def send_telegram(text: str) -> int | None:
         return None
 
 
+def reply_telegram(text: str, reply_to_message_id: int | None) -> int | None:
+    """Sends a message threaded as a reply to the original signal post (if
+    we have its message_id), so TP/SL/close-out updates show up attached to
+    the trade they belong to instead of as standalone messages."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
+        log.info("Telegram not configured; update:\n%s", text)
+        return None
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+    req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                  headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("result", {}).get("message_id")
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as e:
+        log.error("Telegram reply failed: %s", e)
+        return None
+
+
+def react_telegram(message_id: int | None, emoji: str) -> None:
+    """Best-effort emoji reaction on the original signal message. Uses only
+    emoji from Telegram's allowed reaction set. Failures are logged and
+    swallowed -- a missing reaction should never break signal tracking."""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
+        return
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/setMessageReaction"
+    payload = json.dumps({
+        "chat_id": TG_CHAT_ID, "message_id": message_id,
+        "reaction": [{"type": "emoji", "emoji": emoji}],
+    }).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError) as e:
+        log.debug("Telegram reaction failed (non-fatal): %s", e)
+
+
 # ============================================================================
 # ACTIVE SIGNAL TRACKING / OUTCOME RESOLUTION
 # ============================================================================
 
-def record_signal(state: dict, cand: Candidate, confidence: float, grade: str, bar_index: int):
+def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
+                   bar_index: int, message_id: int | None) -> dict:
     entry = {
         "symbol": cand.symbol, "direction": cand.direction, "pathway": cand.pathway,
         "combo": cand.combo_name, "entry": cand.entry, "sl": cand.sl,
-        "tp1": cand.tp1, "tp2": cand.tp2, "confidence": confidence, "grade": grade,
-        "ts": int(time.time()), "bar_index": bar_index, "result": "open",
+        "risk": abs(cand.entry - cand.sl), "tp1": cand.tp1, "tp2": cand.tp2,
+        "confidence": confidence, "grade": grade, "ts": int(time.time()),
+        "bar_index": bar_index, "result": "open", "tp1_hit": False,
+        "message_id": message_id,
     }
     state["active_signals"].append(entry)
     state["signal_history"].append(dict(entry))
     update_cooldown(state, cand.symbol, cand.direction, bar_index)
+    return entry
+
+
+def _r_multiple(sig: dict, price: float) -> float:
+    risk = sig.get("risk") or abs(sig["entry"] - sig["sl"])
+    if not risk:
+        return 0.0
+    raw = (price - sig["entry"]) if sig["direction"] == "long" else (sig["entry"] - price)
+    return round(raw / risk, 2)
+
+
+def _sync_history(state: dict, sig: dict):
+    for h in state["signal_history"]:
+        if h.get("ts") == sig.get("ts") and h.get("symbol") == sig.get("symbol") \
+           and h.get("direction") == sig.get("direction"):
+            h.update(sig)
+            return
+
+
+def _notify_tp1(sig: dict, price: float):
+    r = _r_multiple(sig, price)
+    text = (f"\U0001F525 *TP1 hit* -- {sig['symbol']} {sig['direction'].upper()}\n"
+            f"Price: `{fmt_px(price)}`  |  +{r:.2f}R banked\n"
+            f"SL moved to breakeven (`{fmt_px(sig['entry'])}`).")
+    reply_telegram(text, sig.get("message_id"))
+    react_telegram(sig.get("message_id"), "\U0001F525")
+    log.info("TP1 hit: %s %s +%.2fR, SL -> breakeven", sig["symbol"], sig["direction"], r)
+
+
+def _close_out(state: dict, sig: dict, result: str, price: float):
+    r = _r_multiple(sig, price)
+    sig["result"] = result
+    sig["exit_price"] = price
+    sig["r_realized"] = r
+    sig["closed_ts"] = int(time.time())
+    _sync_history(state, sig)
+
+    if result == "win":
+        headline = "\u2705 *TP2 hit -- WIN*"
+        emoji = "\U0001F44D"
+    elif sig.get("tp1_hit"):
+        headline = "\u2696\ufe0f *Stopped at breakeven*"
+        emoji = "\U0001F44D"
+    else:
+        headline = "\u274C *SL hit -- LOSS*"
+        emoji = "\U0001F44E"
+    text = (f"{headline} -- {sig['symbol']} {sig['direction'].upper()}\n"
+            f"Exit: `{fmt_px(price)}`  |  Result: {r:+.2f}R")
+    reply_telegram(text, sig.get("message_id"))
+    react_telegram(sig.get("message_id"), emoji)
+    log.info("Signal resolved: %s %s %s -> %s (%.2fR)",
+              sig["symbol"], sig["direction"], sig["pathway"], result, r)
 
 
 def check_active_signals(state: dict, snapshot: dict):
@@ -1286,36 +1474,79 @@ def check_active_signals(state: dict, snapshot: dict):
             still_active.append(sig)
             continue
         price = info["mark"]
-        hit_sl = (price <= sig["sl"]) if sig["direction"] == "long" else (price >= sig["sl"])
-        hit_tp2 = (price >= sig["tp2"]) if sig["direction"] == "long" else (price <= sig["tp2"])
+        direction = sig["direction"]
+
+        hit_sl = (price <= sig["sl"]) if direction == "long" else (price >= sig["sl"])
+        hit_tp2 = (price >= sig["tp2"]) if direction == "long" else (price <= sig["tp2"])
+        hit_tp1 = (not sig.get("tp1_hit")) and (
+            (price >= sig["tp1"]) if direction == "long" else (price <= sig["tp1"])
+        )
+
         if hit_sl:
-            _resolve(state, sig, "loss")
-        elif hit_tp2:
-            _resolve(state, sig, "win")
-        else:
-            still_active.append(sig)
+            _close_out(state, sig, "win" if sig.get("tp1_hit") else "loss", price)
+            continue
+        if hit_tp2:
+            _close_out(state, sig, "win", price)
+            continue
+        if hit_tp1:
+            sig["tp1_hit"] = True
+            sig["sl"] = sig["entry"]  # lock in breakeven once TP1 is banked
+            _notify_tp1(sig, price)
+            _sync_history(state, sig)
+        still_active.append(sig)
     state["active_signals"] = still_active
 
 
-def _resolve(state: dict, sig: dict, result: str):
-    for h in state["signal_history"]:
-        if h is sig or (h.get("ts") == sig.get("ts") and h.get("symbol") == sig.get("symbol")
-                        and h.get("direction") == sig.get("direction")):
-            h["result"] = result
-            break
-    log.info("Signal resolved: %s %s %s -> %s", sig["symbol"], sig["direction"], sig["pathway"], result)
+def generate_daily_summary(state: dict) -> str:
+    cutoff = time.time() - 86400
+    recent = [h for h in state["signal_history"] if h.get("ts", 0) >= cutoff]
+    resolved = [h for h in recent if h.get("result") in ("win", "loss")]
+    wins = [h for h in resolved if h["result"] == "win"]
+    losses = [h for h in resolved if h["result"] == "loss"]
+    open_now = [h for h in recent if h.get("result") == "open"]
+    total_r = sum(h.get("r_realized", 0.0) for h in resolved)
+    win_rate = (len(wins) / len(resolved) * 100) if resolved else 0.0
+
+    lines = [
+        "\U0001F4CA *AXIS ENGINE -- 24h Summary*",
+        "",
+        f"Signals fired: {len(recent)}",
+        f"Resolved: {len(resolved)}  (\u2705 {len(wins)}  \u274C {len(losses)})",
+        f"Still open: {len(open_now)}",
+        f"Win rate: {win_rate:.1f}%",
+        f"Net R: {total_r:+.2f}",
+    ]
+    if resolved:
+        by_pathway: dict[str, list] = {}
+        for h in resolved:
+            by_pathway.setdefault(h["pathway"], []).append(h)
+        lines.append("")
+        lines.append("By pathway:")
+        for pw, items in by_pathway.items():
+            w = sum(1 for i in items if i["result"] == "win")
+            lines.append(f"  \u2022 {pw}: {w}/{len(items)} ({100*w/len(items):.0f}%)")
+    return "\n".join(lines)
+
+
+def maybe_send_daily_summary(state: dict):
+    last = state.get("last_summary_ts", 0)
+    if time.time() - last < 86400:
+        return
+    summary = generate_daily_summary(state)
+    send_telegram(summary)
+    state["last_summary_ts"] = int(time.time())
 
 
 # ============================================================================
 # MAIN EVALUATION / SCAN
 # ============================================================================
 
-def evaluate_symbol(symbol: str, state: dict, btc_bias: str, btc_strength: float,
-                     snapshot: dict, threshold: float, clusters: list[set[str]]) -> Optional[dict]:
-    bundle = fetch_all_candles(symbol)
-    if not bundle:
-        return None
-
+def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_strength: float,
+                     snapshot: dict, threshold: float) -> Optional[dict]:
+    """Pure evaluation: reads state (cooldowns, win-rate priors) but never
+    writes it. All state mutation (cooldown update, signal recording,
+    Telegram send) happens centrally in run_scan after this returns, so the
+    per-symbol fetch+scoring work here is safe to run concurrently."""
     regime = build_regime_vector(state, symbol, bundle, btc_bias, btc_strength, COMBOS["intraday"])
     combo_name = select_combo(regime)
     local_threshold = adaptive_thresholds(regime, threshold)
@@ -1323,12 +1554,14 @@ def evaluate_symbol(symbol: str, state: dict, btc_bias: str, btc_strength: float
 
     bar_index = bundle[combo["exec"]][-1]["t"] // TF_MS[combo["exec"]]
     book = analyze_orderbook(symbol)
+    market_price = snapshot.get(symbol, {}).get("mark") or bundle[combo["exec"]][-1]["c"]
 
     best: Optional[tuple[Candidate, float, str]] = None
     for builder in PATHWAYS:
         cand = builder(symbol, bundle, combo_name, regime)
         if cand is None:
             continue
+        cand = clamp_candidate_to_market(cand, market_price)
         if not check_cooldown(state, symbol, cand.direction, bar_index):
             continue
         if is_recent_duplicate(state, symbol, cand.direction, cand.entry):
@@ -1348,8 +1581,7 @@ def evaluate_symbol(symbol: str, state: dict, btc_bias: str, btc_strength: float
     if best is None:
         return None
     cand, confidence, grade = best
-    record_signal(state, cand, confidence, grade, bar_index)
-    return {"cand": cand, "confidence": confidence, "grade": grade}
+    return {"cand": cand, "confidence": confidence, "grade": grade, "bar_index": bar_index}
 
 
 def count_open_same_direction(state: dict, direction: str) -> int:
@@ -1360,13 +1592,31 @@ def count_open_for_symbol(state: dict, symbol: str) -> int:
     return sum(1 for s in state["active_signals"] if s["symbol"] == symbol)
 
 
+def _prefetch(symbol: str) -> tuple[str, dict | None]:
+    return symbol, fetch_all_candles(symbol)
+
+
 def run_scan():
     log.info("=== AXIS ENGINE v2.0.0 scan starting ===")
+    t_start = time.monotonic()
     state = load_state()
     snapshot = get_market_snapshot()
     check_active_signals(state, snapshot)
 
-    btc_bundle = fetch_all_candles("BTC")
+    symbols_to_fetch = ["BTC"] + [s for s in WATCHLIST if s != "BTC"]
+    bundles: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=FETCH_THREAD_WORKERS) as pool:
+        futures = {pool.submit(_prefetch, sym): sym for sym in symbols_to_fetch}
+        for fut in as_completed(futures):
+            sym, bundle = fut.result()
+            if bundle:
+                bundles[sym] = bundle
+            else:
+                log.info("No candle bundle for %s this scan.", sym)
+    log.info("Prefetched %d/%d symbol bundles in %.1fs",
+              len(bundles), len(symbols_to_fetch), time.monotonic() - t_start)
+
+    btc_bundle = bundles.get("BTC")
     if not btc_bundle:
         log.error("Could not fetch BTC bundle; aborting scan.")
         save_state(state)
@@ -1374,53 +1624,54 @@ def run_scan():
     btc_bias, btc_strength = compute_btc_regime(btc_bundle)
     log.info("BTC regime: %s (ADX %.1f)", btc_bias, btc_strength)
 
-    bundles_for_corr = {"BTC": btc_bundle}
     fired = []
     threshold = state["governor"]["threshold"]
 
     for symbol in WATCHLIST:
+        if symbol not in bundles:
+            continue
         if count_open_for_symbol(state, symbol) >= MAX_CONCURRENT_PER_SYMBOL:
             continue
         try:
-            result = evaluate_symbol(symbol, state, btc_bias, btc_strength, snapshot, threshold, [])
+            result = evaluate_symbol(symbol, bundles[symbol], state, btc_bias,
+                                      btc_strength, snapshot, threshold)
         except Exception as e:
             log.exception("Error evaluating %s: %s", symbol, e)
             continue
         if result:
-            direction = result["cand"].direction
-            if count_open_same_direction(state, direction) > MAX_CONCURRENT_SAME_DIRECTION:
-                log.info("Skipping %s: same-direction cap reached", symbol)
-                state["active_signals"].pop()  # undo speculative record
-                state["signal_history"].pop()
-                continue
             fired.append(result)
 
-    # Correlation dedup pass across everything fired this scan
+    # Correlation dedup pass across everything that qualified this scan,
+    # reusing the already-fetched bundles instead of re-hitting the API.
     if len(fired) > 1:
-        bundles_map = {r["cand"].symbol: {} for r in fired}
-        for r in fired:
-            b = fetch_all_candles(r["cand"].symbol)
-            if b:
-                bundles_map[r["cand"].symbol] = b
-        clusters = build_correlation_clusters({k: v for k, v in bundles_map.items() if v})
+        corr_bundles = {r["cand"].symbol: bundles[r["cand"].symbol] for r in fired}
+        clusters = build_correlation_clusters(corr_bundles)
         ranked = [{"symbol": r["cand"].symbol, "direction": r["cand"].direction,
                    "confidence": r["confidence"], "ref": r} for r in fired]
         kept = dedup_correlated(ranked, clusters)
-        kept_refs = {id(k["ref"]) for k in kept}
-        fired = [r for r in fired if id(r) in kept_refs or r in [k["ref"] for k in kept]]
+        kept_ids = {id(k["ref"]) for k in kept}
+        fired = [r for r in fired if id(r) in kept_ids]
 
+    sent = 0
     for r in fired:
+        direction = r["cand"].direction
+        if count_open_same_direction(state, direction) >= MAX_CONCURRENT_SAME_DIRECTION:
+            log.info("Skipping %s: same-direction cap reached", r["cand"].symbol)
+            continue
         text = format_signal(r["cand"], r["confidence"], r["grade"])
-        send_telegram(text)
+        message_id = send_telegram(text)
+        record_signal(state, r["cand"], r["confidence"], r["grade"], r["bar_index"], message_id)
+        sent += 1
         log.info("Signal fired: %s %s (%s) conf=%.1f grade=%s",
                   r["cand"].symbol, r["cand"].direction, r["cand"].pathway,
                   r["confidence"], r["grade"])
 
+    maybe_send_daily_summary(state)
     governor_adjust_threshold(state, estimate_signals_last_24h(state))
     prune_state(state)
     save_state(state)
-    log.info("=== Scan complete: %d signal(s) fired, threshold now %.1f ===",
-              len(fired), state["governor"]["threshold"])
+    log.info("=== Scan complete: %d signal(s) fired, threshold now %.1f, took %.1fs ===",
+              sent, state["governor"]["threshold"], time.monotonic() - t_start)
 
 
 def main():
