@@ -125,8 +125,14 @@ FETCH_THREAD_WORKERS = 6
 
 # Trend-continuation pathway tuning
 TREND_ADX_MIN = 20.0
-RSI_DIP_LONG, RSI_TURN_LONG = 45.0, 40.0
-RSI_DIP_SHORT, RSI_TURN_SHORT = 55.0, 60.0
+# RSI must dip into a real pullback zone, THEN turn back out past a level
+# stricter than the dip (confirming momentum actually resumed -- not just
+# "not still falling"). Previously TURN was inverted to sit *inside* the
+# DIP threshold (40 < 45 for longs), so almost any shallow dip-and-flatten
+# satisfied the check without a genuine bounce, which is why this pathway
+# was firing on setups that kept sliding instead of resuming the trend.
+RSI_DIP_LONG, RSI_TURN_LONG = 40.0, 45.0
+RSI_DIP_SHORT, RSI_TURN_SHORT = 60.0, 55.0
 RSI_RESET_LOOKBACK = 8
 
 # Momentum breakout pathway tuning
@@ -976,10 +982,13 @@ def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
         return None
 
     price = ind_bias["closes"][-1]
-    ef, es = ind_bias["ema_fast"][-1], ind_bias["ema_slow"][-1]
-    if price > ef > es:
+    ef, es, et = ind_bias["ema_fast"][-1], ind_bias["ema_slow"][-1], ind_bias["ema_trend"][-1]
+    # Require the full EMA20/50/200 stack aligned (same test used for BTC
+    # regime), not just EMA20 vs EMA50. A 20/50 cross alone fires plenty on
+    # medium-term counter-trend bounces that aren't real continuation.
+    if price > ef > es > et:
         direction = "long"
-    elif price < ef < es:
+    elif price < ef < es < et:
         direction = "short"
     else:
         return None
