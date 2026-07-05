@@ -1,1 +1,279 @@
-{}
+{
+  "active_signals": [
+    {
+      "symbol": "PENGU",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.006583,
+      "sl": 0.006480495,
+      "risk": 0.00010250500000000013,
+      "tp1": 0.006781,
+      "tp2": 0.006848,
+      "confidence": 97.94,
+      "grade": "A+",
+      "ts": 1783240271,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1543
+    },
+    {
+      "symbol": "DOGE",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.07605,
+      "sl": 0.075352535,
+      "risk": 0.0006974650000000082,
+      "tp1": 0.077171,
+      "tp2": 0.078105,
+      "confidence": 98.48,
+      "grade": "A+",
+      "ts": 1783240271,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1544
+    },
+    {
+      "symbol": "AAVE",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 88.393,
+      "sl": 87.61109499999999,
+      "risk": 0.781905000000009,
+      "tp1": 89.235,
+      "tp2": 90.361,
+      "confidence": 93.38,
+      "grade": "A+",
+      "ts": 1783240272,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1545
+    },
+    {
+      "symbol": "UNI",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 3.1998,
+      "sl": 3.1557695,
+      "risk": 0.044030500000000306,
+      "tp1": 3.2492,
+      "tp2": 3.3099,
+      "confidence": 98.76,
+      "grade": "A+",
+      "ts": 1783240273,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1546
+    },
+    {
+      "symbol": "PENDLE",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 1.438,
+      "sl": 1.4298359999999999,
+      "risk": 0.00816400000000006,
+      "tp1": 1.450246,
+      "tp2": 1.4603,
+      "confidence": 97.79,
+      "grade": "A+",
+      "ts": 1783240273,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1547
+    }
+  ],
+  "signal_history": [
+    {
+      "symbol": "PENGU",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.006583,
+      "sl": 0.006480495,
+      "risk": 0.00010250500000000013,
+      "tp1": 0.006781,
+      "tp2": 0.006848,
+      "confidence": 97.94,
+      "grade": "A+",
+      "ts": 1783240271,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1543
+    },
+    {
+      "symbol": "DOGE",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.07605,
+      "sl": 0.075352535,
+      "risk": 0.0006974650000000082,
+      "tp1": 0.077171,
+      "tp2": 0.078105,
+      "confidence": 98.48,
+      "grade": "A+",
+      "ts": 1783240271,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1544
+    },
+    {
+      "symbol": "AAVE",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 88.393,
+      "sl": 87.61109499999999,
+      "risk": 0.781905000000009,
+      "tp1": 89.235,
+      "tp2": 90.361,
+      "confidence": 93.38,
+      "grade": "A+",
+      "ts": 1783240272,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1545
+    },
+    {
+      "symbol": "UNI",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 3.1998,
+      "sl": 3.1557695,
+      "risk": 0.044030500000000306,
+      "tp1": 3.2492,
+      "tp2": 3.3099,
+      "confidence": 98.76,
+      "grade": "A+",
+      "ts": 1783240273,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1546
+    },
+    {
+      "symbol": "PENDLE",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 1.438,
+      "sl": 1.4298359999999999,
+      "risk": 0.00816400000000006,
+      "tp1": 1.450246,
+      "tp2": 1.4603,
+      "confidence": 97.79,
+      "grade": "A+",
+      "ts": 1783240273,
+      "bar_index": 1981377,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 1547
+    }
+  ],
+  "cooldowns": {
+    "PENGU:long": 1981377,
+    "DOGE:long": 1981377,
+    "AAVE:long": 1981377,
+    "UNI:long": 1981377,
+    "PENDLE:long": 1981377
+  },
+  "atr_pct_memory": {
+    "BTC": [
+      0.010810467771435022
+    ],
+    "ETH": [
+      0.014885890875388906
+    ],
+    "HYPE": [
+      0.022434757370985603
+    ],
+    "ZEC": [
+      0.027489530974785
+    ],
+    "NEAR": [
+      0.026758723322546068
+    ],
+    "ONDO": [
+      0.02183052503783199
+    ],
+    "SUI": [
+      0.020471004496771483
+    ],
+    "PENGU": [
+      0.02675145174854098
+    ],
+    "BNB": [
+      0.011202419220436396
+    ],
+    "SOL": [
+      0.017983352531745114
+    ],
+    "TRX": [
+      0.004693601068463771
+    ],
+    "BCH": [
+      0.021876212553148436
+    ],
+    "DOGE": [
+      0.017558036586222653
+    ],
+    "ADA": [
+      0.028373465576737263
+    ],
+    "DOT": [
+      0.017839686872615328
+    ],
+    "TAO": [
+      0.02028953851409725
+    ],
+    "AVAX": [
+      0.01785544352454439
+    ],
+    "LINK": [
+      0.015772298099755784
+    ],
+    "AAVE": [
+      0.02446288823506397
+    ],
+    "XRP": [
+      0.016533969974429286
+    ],
+    "XLM": [
+      0.0294260642797559
+    ],
+    "UNI": [
+      0.021808905700313123
+    ],
+    "APT": [
+      0.020886214100320093
+    ],
+    "PENDLE": [
+      0.025688166280564098
+    ]
+  },
+  "governor": {
+    "threshold": 66.0,
+    "last_adjust_ts": 0,
+    "daily_count_ema": 5.9
+  },
+  "corr_returns": {},
+  "last_summary_ts": 1783240277,
+  "meta": {
+    "version": "2.0.0",
+    "created": 1783240236
+  },
+  "last_summary_date": "2026-07-05"
+}
