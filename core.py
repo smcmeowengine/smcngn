@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIS ENGINE v2.0.0
+AXIS ENGINE v2.1.0
 ==================
 Ground-up institutional-grade multi-timeframe SMC/ICT crypto perpetual
 signal engine for Hyperliquid, synthesized from Crucible Alpha, Meridian,
@@ -13,15 +13,35 @@ Nyx, Vectis, and the scalp_swing_bot lineage -- plus original additions:
     5-10 signal/day band using a slow, rate-limited EMA of daily signal
     count, so it reacts to sustained conditions, not scan-to-scan noise.
   - Composite Regime Vector (BTC macro bias, symbol volatility percentile,
-    ADX trend strength, session liquidity weight, noise index) feeding both
-    threshold selection AND per-pathway eligibility.
+    ADX trend strength, session liquidity weight, noise index, cross-
+    sectional market breadth) feeding both threshold selection AND
+    per-pathway eligibility.
   - Correlation-cluster deduplication computed dynamically from realized
     returns each run, not a static hand-maintained group table.
-  - Historical edge weighting: each candidate's confidence is nudged by the
-    live win-rate of its (pathway, setup-grade, symbol-cluster) bucket.
+  - Historical edge weighting: each candidate's confidence is nudged by a
+    regularized, self-tuning per-pathway weight.
   - Structure-aware, liquidity-target TP/SL: stops sit beyond invalidation
     structure with an ATR floor; targets are clipped to the nearest real
-    opposing liquidity pool / order block rather than a blind R-multiple.
+    opposing liquidity pool / order block / volume-profile value-area edge
+    rather than a blind R-multiple.
+
+v2.1.0 ports three pieces from the Helios v1.0 lineage that this engine
+didn't have:
+  1. Session Volume Profile (POC / Value Area / VWAP): folded into TP
+     clipping alongside the existing swing-derived liquidity pools, and
+     into scoring as a VWAP-alignment confluence. Previously TP targets
+     were clipped only to swing highs/lows, which misses real
+     volume-built support/resistance that never happened to coincide with
+     a swing point.
+  2. Regularized self-tuning pathway weights: replaces the old raw,
+     unsmoothed win-rate readout in scoring with a bounded multiplier per
+     pathway that drifts slowly toward its recent win-rate, shrunk toward
+     a neutral prior so a short streak can't overfit the engine.
+  3. Market breadth gate: the regime vector now carries the cross-
+     sectional fraction of the watchlist whose own 1h trend agrees with
+     BTC's regime bias, feeding both the adaptive threshold and per-
+     candidate regime fit -- so a signal is graded with awareness of
+     whether the rest of the market is confirming the move.
 
 Single file, immediately runnable. Scan-per-run model: an external
 scheduler (cron-job.org, GitHub Actions cron, systemd timer, etc.) invokes
@@ -30,7 +50,7 @@ the script; there is no long-running process and no database.
 
 Configure via environment variables (see CONFIGURATION below) and run:
 
-    python3 axis_engine_v2_0_0.py
+    python3 axis_engine_v2_1_0.py
 
 Author: AXIS ENGINE project
 """
@@ -89,6 +109,13 @@ ADX_LEN = 14
 EMA_FAST, EMA_SLOW, EMA_TREND = 20, 50, 200
 BB_LEN, BB_MULT = 20, 2.0
 
+# --- Session Volume Profile (ported from Helios v1.0) ----------------------
+# Volume-at-price model (POC / Value Area / VWAP) computed once per symbol
+# per scan from recent 1h candles. Feeds TP clipping alongside the existing
+# swing-derived liquidity pools, and a VWAP-alignment confluence in scoring.
+VOL_PROFILE_BINS = 24
+VOL_PROFILE_LOOKBACK_BARS = 96   # ~4 days of 1h bars as the "session" profile
+
 # --- Adaptive Frequency Governor -------------------------------------------
 TARGET_SIGNALS_MIN = 5
 TARGET_SIGNALS_MAX = 10
@@ -96,6 +123,15 @@ GOVERNOR_STEP = 2.0
 GOVERNOR_FLOOR = 54.0
 GOVERNOR_CEIL = 88.0
 GOVERNOR_MIN_INTERVAL_S = 3600  # rate-limit threshold nudges to once/hour
+
+# --- Self-tuning pathway weights (ported from Helios v1.0) ------------------
+# Replaces the old raw win-rate readout in score_candidate (which pulled the
+# unsmoothed pathway win-rate straight off history every scan) with a
+# regularized version: each pathway's multiplier drifts slowly toward a
+# win-rate-implied target, shrunk toward the neutral prior of 1.0 and
+# bounded, so a short hot/cold streak can't swing scoring on its own.
+PATHWAY_WEIGHT_LEARNING_RATE = 0.04
+PATHWAY_WEIGHT_MIN, PATHWAY_WEIGHT_MAX = 0.75, 1.30
 
 # --- Setup Grade -> risk sizing hint (percent of equity), informational ---
 GRADE_SIZE_TABLE = {
@@ -492,9 +528,12 @@ def _default_state() -> dict:
         "cooldowns": {},
         "atr_pct_memory": {},
         "governor": {"threshold": 66.0, "last_adjust_ts": 0, "daily_count_ema": 6.0},
+        "pathway_weights": {
+            "liquidity_reversal": 1.0, "trend_continuation": 1.0, "momentum_breakout": 1.0,
+        },
         "corr_returns": {},
         "last_summary_ts": 0,
-        "meta": {"version": "2.0.0", "created": int(time.time())},
+        "meta": {"version": "2.1.0", "created": int(time.time())},
     }
 
 
@@ -544,13 +583,19 @@ class RegimeVector:
     adx_bias: float
     session_weight: float
     noise_index: float
+    breadth: float   # 0..1, % of watchlist whose own 1h trend agrees with btc_bias (ported from Helios v1.0)
 
     def composite_favorability(self) -> float:
         # Higher is more favorable for taking signals (clean trend, decent
-        # liquidity, not chaotic noise).
+        # liquidity, not chaotic noise, and now: the rest of the market
+        # actually agreeing with BTC rather than BTC moving in isolation).
         trend_component = min(self.adx_bias / 35.0, 1.0)
         noise_penalty = max(0.0, 1.0 - self.noise_index)
-        return round(0.45 * trend_component + 0.30 * noise_penalty + 0.25 * self.session_weight, 4)
+        return round(
+            0.38 * trend_component + 0.26 * noise_penalty +
+            0.21 * self.session_weight + 0.15 * self.breadth,
+            4,
+        )
 
 
 def session_weight_now() -> float:
@@ -604,8 +649,35 @@ def compute_noise_index(candles: list[dict], lookback: int = 30) -> float:
     return round(1.0 - min(efficiency, 1.0), 4)
 
 
-def build_regime_vector(state: dict, symbol: str, bundle: dict,
-                         btc_bias: str, btc_strength: float, combo: dict) -> RegimeVector:
+def symbol_bias_from_bundle(bundle: dict) -> str | None:
+    """Lightweight 1h EMA20/EMA50 bias read for the market-breadth gate,
+    reusing an already-fetched candle bundle instead of firing a dedicated
+    request per symbol (ported from Helios v1.0's quick_bias_scan, adapted
+    since Axis already prefetches every symbol's bundle up front)."""
+    candles = bundle.get("1h")
+    if not candles or len(candles) < EMA_SLOW + 5:
+        return None
+    closes = [c["c"] for c in candles]
+    fast, slow = ema(closes, EMA_FAST)[-1], ema(closes, EMA_SLOW)[-1]
+    return "bullish" if fast > slow else "bearish"
+
+
+def compute_breadth(bundles: dict[str, dict], btc_bias: str) -> float:
+    """Cross-sectional market-breadth gate (ported from Helios v1.0): the
+    fraction of the watchlist whose own 1h trend agrees with BTC's regime
+    bias. A neutral BTC bias (no clear stack alignment) makes "agreement"
+    undefined, so this falls back to a neutral 0.5 read in that case too."""
+    if btc_bias not in ("bullish", "bearish") or not bundles:
+        return 0.5
+    biases = [b for b in (symbol_bias_from_bundle(bundle) for bundle in bundles.values()) if b is not None]
+    if not biases:
+        return 0.5
+    aligned = sum(1 for b in biases if b == btc_bias)
+    return aligned / len(biases)
+
+
+def build_regime_vector(state: dict, symbol: str, bundle: dict, btc_bias: str,
+                         btc_strength: float, breadth: float, combo: dict) -> RegimeVector:
     ind_bias = compute_indicators(bundle[combo["bias"]])
     atr_pct = safe(ind_bias["atr"][-1] / ind_bias["closes"][-1], 0.01)
     vol_pctile = update_atr_pct_memory(state, symbol, atr_pct)
@@ -613,7 +685,7 @@ def build_regime_vector(state: dict, symbol: str, bundle: dict,
     return RegimeVector(
         btc_bias=btc_bias, btc_strength=btc_strength, vol_pctile=vol_pctile,
         adx_bias=safe(ind_bias["adx"][-1], 0.0), session_weight=session_weight_now(),
-        noise_index=noise,
+        noise_index=noise, breadth=breadth,
     )
 
 
@@ -881,11 +953,57 @@ def clamp_candidate_to_market(cand: "Candidate", market_price: float) -> "Candid
     return cand
 
 
-def _clip_tp_to_liquidity(entry: float, tp: float, direction: str, pools: dict) -> float:
+def volume_profile(candles: list[dict], bins: int = VOL_PROFILE_BINS) -> dict:
+    """Session volume profile -> POC (point of control), value-area
+    high/low, and session VWAP (ported from Helios v1.0). This is a proper
+    volume-at-price read rather than inferring support/resistance from
+    candle wicks alone: it buckets the (h+l+c)/3 typical price of each bar
+    by traded volume, takes the highest-volume bucket as the POC, then
+    expands outward bucket-by-bucket (always toward whichever side has more
+    volume) until 70% of total volume is enclosed -- that span is the value
+    area. Used downstream to clip TP targets to real volume-built levels
+    (alongside the existing swing-derived liquidity pools) and as a VWAP
+    confluence check in scoring."""
+    hi = max(c["h"] for c in candles)
+    lo = min(c["l"] for c in candles)
+    if hi <= lo:
+        return {"poc": hi, "vah": hi, "val": lo, "vwap": hi}
+    step = (hi - lo) / bins
+    buckets = [0.0] * bins
+    for c in candles:
+        idx = min(bins - 1, max(0, int((((c["h"] + c["l"] + c["c"]) / 3) - lo) / step)))
+        buckets[idx] += c["v"]
+    poc_idx = max(range(bins), key=lambda i: buckets[i])
+    poc = lo + (poc_idx + 0.5) * step
+    total = sum(buckets) or 1.0
+    target = total * 0.70
+    lo_i = hi_i = poc_idx
+    acc = buckets[poc_idx]
+    while acc < target and (lo_i > 0 or hi_i < bins - 1):
+        expand_lo = buckets[lo_i - 1] if lo_i > 0 else -1
+        expand_hi = buckets[hi_i + 1] if hi_i < bins - 1 else -1
+        if expand_hi >= expand_lo:
+            hi_i += 1
+            acc += buckets[hi_i]
+        else:
+            lo_i -= 1
+            acc += buckets[lo_i]
+    vah, val = lo + (hi_i + 1) * step, lo + lo_i * step
+    vwap_num = sum(((c["h"] + c["l"] + c["c"]) / 3) * c["v"] for c in candles)
+    vwap_den = sum(c["v"] for c in candles) or 1.0
+    return {"poc": poc, "vah": vah, "val": val, "vwap": vwap_num / vwap_den}
+
+
+def _clip_tp_to_liquidity(entry: float, tp: float, direction: str, pools: dict,
+                           vp: dict | None = None) -> float:
     targets = pools["resistance"] if direction == "long" else pools["support"]
-    if not targets:
-        return tp
     candidates = [lv for lv, _ in targets if (lv > entry if direction == "long" else lv < entry)]
+    # Volume-profile value-area edges + POC (ported from Helios v1.0): real
+    # volume-built levels the swing-only pools above can miss entirely when
+    # the market built out participation somewhere price never wicked to.
+    if vp:
+        candidates += [lv for lv in (vp["poc"], vp["vah"], vp["val"])
+                       if (lv > entry if direction == "long" else lv < entry)]
     if not candidates:
         return tp
     nearest = min(candidates, key=lambda lv: abs(lv - tp))
@@ -898,7 +1016,7 @@ def _clip_tp_to_liquidity(entry: float, tp: float, direction: str, pools: dict) 
 
 
 def build_pathway_liquidity_reversal(symbol: str, bundle: dict, combo_name: str,
-                                      regime: RegimeVector) -> Optional[Candidate]:
+                                      regime: RegimeVector, vp: dict) -> Optional[Candidate]:
     combo = COMBOS[combo_name]
     struct_candles = bundle[combo["struct"]]
     exec_candles = bundle[combo["exec"]]
@@ -938,8 +1056,8 @@ def build_pathway_liquidity_reversal(symbol: str, bundle: dict, combo_name: str,
             raw_tp1 = entry - (sl - entry) * 1.5
             raw_tp2 = entry - (sl - entry) * 2.8
 
-        tp1 = _clip_tp_to_liquidity(entry, raw_tp1, direction, pools)
-        tp2 = _clip_tp_to_liquidity(entry, raw_tp2, direction, pools)
+        tp1 = _clip_tp_to_liquidity(entry, raw_tp1, direction, pools, vp)
+        tp2 = _clip_tp_to_liquidity(entry, raw_tp2, direction, pools, vp)
 
         confluences = ["liquidity sweep", f"MSS confirmed ({combo['exec']})",
                        f"{pd_zone['zone']} zone"]
@@ -971,7 +1089,7 @@ def _rsi_reset(ind: dict, direction: str) -> bool:
 
 
 def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
-                                      regime: RegimeVector) -> Optional[Candidate]:
+                                      regime: RegimeVector, vp: dict) -> Optional[Candidate]:
     combo = COMBOS[combo_name]
     bias_candles = bundle[combo["bias"]]
     exec_candles = bundle[combo["exec"]]
@@ -1012,8 +1130,8 @@ def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
         raw_tp1 = entry - (sl - entry) * 1.5
         raw_tp2 = entry - (sl - entry) * 2.5
 
-    tp1 = _clip_tp_to_liquidity(entry, raw_tp1, direction, pools)
-    tp2 = _clip_tp_to_liquidity(entry, raw_tp2, direction, pools)
+    tp1 = _clip_tp_to_liquidity(entry, raw_tp1, direction, pools, vp)
+    tp2 = _clip_tp_to_liquidity(entry, raw_tp2, direction, pools, vp)
 
     confluences = [
         f"{combo['bias']} trend intact (ADX {ind_bias['adx'][-1]:.0f})",
@@ -1033,7 +1151,7 @@ def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
 
 
 def build_pathway_momentum_breakout(symbol: str, bundle: dict, combo_name: str,
-                                     regime: RegimeVector) -> Optional[Candidate]:
+                                     regime: RegimeVector, vp: dict) -> Optional[Candidate]:
     combo = COMBOS[combo_name]
     struct_candles = bundle[combo["struct"]]
     ind = compute_indicators(struct_candles)
@@ -1077,8 +1195,8 @@ def build_pathway_momentum_breakout(symbol: str, bundle: dict, combo_name: str,
 
     swings = find_swings(struct_candles)
     pools = build_liquidity_pools(swings)
-    tp1 = _clip_tp_to_liquidity(entry, raw_tp1, direction, pools)
-    tp2 = _clip_tp_to_liquidity(entry, raw_tp2, direction, pools)
+    tp1 = _clip_tp_to_liquidity(entry, raw_tp1, direction, pools, vp)
+    tp2 = _clip_tp_to_liquidity(entry, raw_tp2, direction, pools, vp)
 
     confluences = [
         f"bollinger squeeze (pctile {pctile:.2f}) resolving",
@@ -1122,20 +1240,8 @@ def logistic(x: float) -> float:
         return 0.0 if x < 0 else 1.0
 
 
-def setup_prior_winrate(state: dict, pathway: str, symbol: str) -> float:
-    """Live win-rate for this (pathway) bucket, falling back to a neutral
-    0.5 prior until enough history accumulates so early samples don't
-    dominate the score."""
-    history = [h for h in state["signal_history"]
-               if h.get("pathway") == pathway and h.get("result") in ("win", "loss")]
-    if len(history) < 8:
-        return 0.5
-    wins = sum(1 for h in history if h["result"] == "win")
-    return wins / len(history)
-
-
 def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
-                     btc_bias: str, book: dict) -> float:
+                     btc_bias: str, book: dict, vp: dict) -> float:
     z = 0.0
     caution_count = sum(1 for c in cand.confluences if c.startswith("caution:"))
     positive_count = len(cand.confluences) - caution_count
@@ -1160,12 +1266,49 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
     else:
         z -= 0.6 * imbalance
 
-    # Historical edge nudge
-    prior = setup_prior_winrate(state, cand.pathway, cand.symbol)
-    z += 1.4 * (prior - 0.5)
+    # Session VWAP alignment (ported from Helios v1.0): being on the "right
+    # side" of session VWAP for the trade direction is a session-level
+    # confluence the swing/structure checks above don't capture on their
+    # own. Asymmetric like Helios's version -- aligned is rewarded more
+    # than misaligned is punished, since VWAP position is a soft confluence
+    # rather than a hard invalidation signal.
+    if vp:
+        vwap_aligned = (cand.entry >= vp["vwap"]) if cand.direction == "long" else (cand.entry <= vp["vwap"])
+        z += 0.4 if vwap_aligned else -0.25
+
+    # Regularized self-tuning pathway weight (ported from Helios v1.0):
+    # replaces the old raw win-rate readout with a bounded multiplier that
+    # tune_pathway_weights() drifts slowly toward the pathway's recent
+    # win-rate, shrunk toward the neutral prior of 1.0. Centering on the
+    # neutral prior means a pathway with no edge yet contributes zero shift.
+    pathway_weight = state["pathway_weights"].get(cand.pathway, 1.0)
+    z += 2.8 * (pathway_weight - 1.0)
 
     confidence = 100 * logistic(z)
     return round(confidence, 2)
+
+
+def tune_pathway_weights(state: dict):
+    """Nudges each pathway's scoring multiplier toward its recent win-rate,
+    shrunk toward the neutral prior (1.0) so a short streak can't push the
+    engine into an overfit corner (ported from Helios v1.0). Bounds are
+    tight (PATHWAY_WEIGHT_MIN..MAX) and the step size is small, so weights
+    drift slowly instead of snapping to whatever the last few outcomes
+    happened to be."""
+    weights = state.setdefault("pathway_weights", {
+        "liquidity_reversal": 1.0, "trend_continuation": 1.0, "momentum_breakout": 1.0,
+    })
+    history = state["signal_history"]
+    for pathway in weights:
+        relevant = [h for h in history if h.get("pathway") == pathway and h.get("result") in ("win", "loss")]
+        if len(relevant) < 15:
+            continue
+        recent = relevant[-40:]
+        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
+        target = 0.85 + 0.5 * wr  # wr=0.5 -> 1.10 neutral-ish; wr=0.3 -> 1.0; wr=0.7 -> 1.20
+        target = max(PATHWAY_WEIGHT_MIN, min(PATHWAY_WEIGHT_MAX, target))
+        weights[pathway] += PATHWAY_WEIGHT_LEARNING_RATE * (target - weights[pathway])
+        weights[pathway] = max(PATHWAY_WEIGHT_MIN, min(PATHWAY_WEIGHT_MAX, weights[pathway]))
 
 
 def grade_for_confidence(confidence: float) -> str:
@@ -1329,7 +1472,7 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.0.0* -- {cand.symbol}/USD",
+        f"*AXIS ENGINE v2.1.0* -- {cand.symbol}/USD",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -1558,12 +1701,12 @@ def maybe_send_daily_summary(state: dict):
 # ============================================================================
 
 def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_strength: float,
-                     snapshot: dict, threshold: float) -> Optional[dict]:
+                     breadth: float, snapshot: dict, threshold: float) -> Optional[dict]:
     """Pure evaluation: reads state (cooldowns, win-rate priors) but never
     writes it. All state mutation (cooldown update, signal recording,
     Telegram send) happens centrally in run_scan after this returns, so the
     per-symbol fetch+scoring work here is safe to run concurrently."""
-    regime = build_regime_vector(state, symbol, bundle, btc_bias, btc_strength, COMBOS["intraday"])
+    regime = build_regime_vector(state, symbol, bundle, btc_bias, btc_strength, breadth, COMBOS["intraday"])
     combo_name = select_combo(regime)
     local_threshold = adaptive_thresholds(regime, threshold)
     combo = COMBOS[combo_name]
@@ -1571,10 +1714,11 @@ def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_s
     bar_index = bundle[combo["exec"]][-1]["t"] // TF_MS[combo["exec"]]
     book = analyze_orderbook(symbol)
     market_price = snapshot.get(symbol, {}).get("mark") or bundle[combo["exec"]][-1]["c"]
+    vp = volume_profile(bundle["1h"][-VOL_PROFILE_LOOKBACK_BARS:])
 
     best: Optional[tuple[Candidate, float, str]] = None
     for builder in PATHWAYS:
-        cand = builder(symbol, bundle, combo_name, regime)
+        cand = builder(symbol, bundle, combo_name, regime, vp)
         if cand is None:
             continue
         cand = clamp_candidate_to_market(cand, market_price)
@@ -1587,7 +1731,7 @@ def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_s
         if not ok:
             log.debug("%s %s filtered: %s", symbol, cand.pathway, reason)
             continue
-        confidence = score_candidate(cand, regime, state, btc_bias, book)
+        confidence = score_candidate(cand, regime, state, btc_bias, book, vp)
         if confidence < local_threshold:
             continue
         grade = grade_for_confidence(confidence)
@@ -1613,7 +1757,7 @@ def _prefetch(symbol: str) -> tuple[str, dict | None]:
 
 
 def run_scan():
-    log.info("=== AXIS ENGINE v2.0.0 scan starting ===")
+    log.info("=== AXIS ENGINE v2.1.0 scan starting ===")
     t_start = time.monotonic()
     state = load_state()
     snapshot = get_market_snapshot()
@@ -1638,7 +1782,10 @@ def run_scan():
         save_state(state)
         return
     btc_bias, btc_strength = compute_btc_regime(btc_bundle)
-    log.info("BTC regime: %s (ADX %.1f)", btc_bias, btc_strength)
+    breadth = compute_breadth(bundles, btc_bias)
+    log.info("BTC regime: %s (ADX %.1f) | breadth %.0f%%", btc_bias, btc_strength, breadth * 100)
+
+    tune_pathway_weights(state)
 
     fired = []
     threshold = state["governor"]["threshold"]
@@ -1650,7 +1797,7 @@ def run_scan():
             continue
         try:
             result = evaluate_symbol(symbol, bundles[symbol], state, btc_bias,
-                                      btc_strength, snapshot, threshold)
+                                      btc_strength, breadth, snapshot, threshold)
         except Exception as e:
             log.exception("Error evaluating %s: %s", symbol, e)
             continue
