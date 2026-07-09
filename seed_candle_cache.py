@@ -24,7 +24,7 @@ import time
 
 # Reuse the engine's own config, HTTP layer, and rate limiter so this
 # script is governed by the exact same weight budget as the live engine.
-import axis_engine_v2_1_0 as axis
+import core as axis
 
 # Extra inter-symbol delay on top of the shared weight limiter. The
 # limiter alone is enough to stay under budget, but a small pause between
