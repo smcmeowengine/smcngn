@@ -34,7 +34,9 @@ jobs:
           fi
 
       - name: Log run reason
-        run: echo "Seed reason: ${{ github.event.inputs.reason }}"
+        env:
+          REASON: ${{ github.event.inputs.reason }}
+        run: echo "Seed reason: $REASON"
 
       - name: Run seed script
         run: python3 seed_candle_cache.py
