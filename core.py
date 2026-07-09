@@ -60,6 +60,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import signal
 import statistics
 import threading
@@ -156,8 +157,8 @@ POI_MAX_PCT_OF_PRICE = 0.008
 # the >60s scan time. A shared token-bucket-style pacer caps request rate
 # across all threads, and a bounded thread pool fetches symbols concurrently
 # so wall-clock time is dominated by the slowest single request, not the sum.
-HL_MAX_REQUESTS_PER_SECOND = 8.0
-FETCH_THREAD_WORKERS = 6
+HL_MAX_REQUESTS_PER_SECOND = 4.0
+FETCH_THREAD_WORKERS = 3
 
 # Trend-continuation pathway tuning
 TREND_ADX_MIN = 20.0
@@ -232,7 +233,7 @@ class _RateLimiter:
 _rate_limiter = _RateLimiter(HL_MAX_REQUESTS_PER_SECOND)
 
 
-def hl_post(payload: dict, retries: int = 4, timeout: int = 12) -> dict | list | None:
+def hl_post(payload: dict, retries: int = 6, timeout: int = 12) -> dict | list | None:
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         HL_API_URL, data=body, headers={"Content-Type": "application/json"}
@@ -245,7 +246,11 @@ def hl_post(payload: dict, retries: int = 4, timeout: int = 12) -> dict | list |
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
-                wait_s = float(retry_after) if retry_after else min(8.0, 0.8 * (2 ** attempt))
+                if retry_after:
+                    wait_s = float(retry_after)
+                else:
+                    base = min(8.0, 0.8 * (2 ** attempt))
+                    wait_s = base + random.uniform(0, base * 0.5)
                 log.warning("hl_post 429 (attempt %d, type=%s), backing off %.1fs",
                             attempt + 1, payload.get("type"), wait_s)
                 time.sleep(wait_s)
@@ -1468,23 +1473,52 @@ def confidence_bar(confidence: float) -> str:
     return "\u2588" * filled + "\u2591" * (10 - filled)
 
 
+# MarkdownV2 requires every literal occurrence of these characters to be
+# escaped -- whether it's dynamic data (symbol, pathway, confluence text)
+# or our own static template punctuation (--, (), .), Telegram's parser
+# doesn't distinguish. Legacy "Markdown" mode couldn't escape characters
+# inside entities at all (e.g. an underscore inside a `code` span), which
+# is what caused signal messages with underscored pathway names like
+# "liquidity_reversal" to be rejected outright with a 400. MarkdownV2
+# supports escaping everywhere, so every message builder below routes
+# text through these helpers instead of hand-building raw f-strings.
+_MD2_SPECIAL_CHARS = set("_*[]()~`>#+-=|{}.!\\")
+
+
+def md2_escape(text) -> str:
+    """Escape a plain string for safe inclusion anywhere in a MarkdownV2
+    message -- call this on every piece of literal or dynamic text.
+    Never call it on the bare * or ` characters used to open/close an
+    entity; only on the text that goes inside them."""
+    return "".join(f"\\{ch}" if ch in _MD2_SPECIAL_CHARS else ch for ch in str(text))
+
+
+def md2_bold(text) -> str:
+    return f"*{md2_escape(text)}*"
+
+
+def md2_code(text) -> str:
+    return f"`{md2_escape(text)}`"
+
+
 def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.1.0* -- {cand.symbol}/USD",
-        f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
+        f"{md2_bold('AXIS ENGINE v2.1.0')} {md2_escape('--')} {md2_escape(f'{cand.symbol}/USD')}",
+        f"{arrow}  {md2_escape('|')}  Grade {md2_bold(grade)}  {md2_escape('|')}  "
+        f"Pathway: {md2_code(cand.pathway)}",
         "",
-        f"Entry:  `{fmt_px(cand.entry)}`",
-        f"SL:     `{fmt_px(cand.sl)}`",
-        f"TP1:    `{fmt_px(cand.tp1)}`",
-        f"TP2:    `{fmt_px(cand.tp2)}`",
-        f"R:R (TP2): `{cand.rr():.2f}`",
-        f"Confidence: {confidence:.1f}%  {confidence_bar(confidence)}",
-        f"Est. hold: {duration}",
+        f"Entry:  {md2_code(fmt_px(cand.entry))}",
+        f"SL:     {md2_code(fmt_px(cand.sl))}",
+        f"TP1:    {md2_code(fmt_px(cand.tp1))}",
+        f"TP2:    {md2_code(fmt_px(cand.tp2))}",
+        f"R:R {md2_escape('(TP2)')}: {md2_code(f'{cand.rr():.2f}')}",
+        f"Confidence: {md2_escape(f'{confidence:.1f}%')}  {confidence_bar(confidence)}",
+        f"Est{md2_escape('.')} hold: {md2_escape(duration)}",
         "",
         "Confluences:",
-    ] + [f"  \u2022 {c}" for c in cand.confluences]
+    ] + [f"  \u2022 {md2_escape(c)}" for c in cand.confluences]
     return "\n".join(lines)
 
 
@@ -1494,7 +1528,7 @@ def send_telegram(text: str) -> int | None:
         return None
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
     payload = json.dumps({
-        "chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown",
+        "chat_id": TG_CHAT_ID, "text": text, "parse_mode": "MarkdownV2",
     }).encode()
     req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
     try:
@@ -1514,7 +1548,7 @@ def reply_telegram(text: str, reply_to_message_id: int | None) -> int | None:
         log.info("Telegram not configured; update:\n%s", text)
         return None
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "MarkdownV2"}
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
@@ -1585,9 +1619,14 @@ def _sync_history(state: dict, sig: dict):
 
 def _notify_tp1(sig: dict, price: float):
     r = _r_multiple(sig, price)
-    text = (f"\U0001F525 *TP1 hit* -- {sig['symbol']} {sig['direction'].upper()}\n"
-            f"Price: `{fmt_px(price)}`  |  +{r:.2f}R banked\n"
-            f"SL moved to breakeven (`{fmt_px(sig['entry'])}`).")
+    text = (
+        f"\U0001F525 {md2_bold('TP1 hit')} {md2_escape('--')} "
+        f"{md2_escape(sig['symbol'])} {md2_escape(sig['direction'].upper())}\n"
+        f"Price: {md2_code(fmt_px(price))}  {md2_escape('|')}  "
+        f"{md2_escape(f'+{r:.2f}R banked')}\n"
+        f"SL moved to breakeven {md2_escape('(')}{md2_code(fmt_px(sig['entry']))}"
+        f"{md2_escape(').')}"
+    )
     reply_telegram(text, sig.get("message_id"))
     react_telegram(sig.get("message_id"), "\U0001F525")
     log.info("TP1 hit: %s %s +%.2fR, SL -> breakeven", sig["symbol"], sig["direction"], r)
@@ -1602,16 +1641,20 @@ def _close_out(state: dict, sig: dict, result: str, price: float):
     _sync_history(state, sig)
 
     if result == "win":
-        headline = "\u2705 *TP2 hit -- WIN*"
+        headline = f"\u2705 {md2_bold('TP2 hit -- WIN')}"
         emoji = "\U0001F44D"
     elif sig.get("tp1_hit"):
-        headline = "\u2696\ufe0f *Stopped at breakeven*"
+        headline = f"\u2696\ufe0f {md2_bold('Stopped at breakeven')}"
         emoji = "\U0001F44D"
     else:
-        headline = "\u274C *SL hit -- LOSS*"
+        headline = f"\u274C {md2_bold('SL hit -- LOSS')}"
         emoji = "\U0001F44E"
-    text = (f"{headline} -- {sig['symbol']} {sig['direction'].upper()}\n"
-            f"Exit: `{fmt_px(price)}`  |  Result: {r:+.2f}R")
+    text = (
+        f"{headline} {md2_escape('--')} {md2_escape(sig['symbol'])} "
+        f"{md2_escape(sig['direction'].upper())}\n"
+        f"Exit: {md2_code(fmt_px(price))}  {md2_escape('|')}  "
+        f"Result: {md2_escape(f'{r:+.2f}R')}"
+    )
     reply_telegram(text, sig.get("message_id"))
     react_telegram(sig.get("message_id"), emoji)
     log.info("Signal resolved: %s %s %s -> %s (%.2fR)",
@@ -1660,13 +1703,14 @@ def generate_daily_summary(state: dict) -> str:
     win_rate = (len(wins) / len(resolved) * 100) if resolved else 0.0
 
     lines = [
-        "\U0001F4CA *AXIS ENGINE -- 24h Summary*",
+        f"\U0001F4CA {md2_bold('AXIS ENGINE -- 24h Summary')}",
         "",
         f"Signals fired: {len(recent)}",
-        f"Resolved: {len(resolved)}  (\u2705 {len(wins)}  \u274C {len(losses)})",
+        f"Resolved: {len(resolved)}  {md2_escape('(')}\u2705 {len(wins)}  "
+        f"\u274C {len(losses)}{md2_escape(')')}",
         f"Still open: {len(open_now)}",
-        f"Win rate: {win_rate:.1f}%",
-        f"Net R: {total_r:+.2f}",
+        f"Win rate: {md2_escape(f'{win_rate:.1f}%')}",
+        f"Net R: {md2_escape(f'{total_r:+.2f}')}",
     ]
     if resolved:
         by_pathway: dict[str, list] = {}
@@ -1676,7 +1720,8 @@ def generate_daily_summary(state: dict) -> str:
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
             w = sum(1 for i in items if i["result"] == "win")
-            lines.append(f"  \u2022 {pw}: {w}/{len(items)} ({100*w/len(items):.0f}%)")
+            pct = 100 * w / len(items)
+            lines.append(f"  \u2022 {md2_escape(pw)}: {w}/{len(items)} {md2_escape(f'({pct:.0f}%)')}")
     return "\n".join(lines)
 
 
@@ -1771,8 +1816,18 @@ def run_scan():
             sym, bundle = fut.result()
             if bundle:
                 bundles[sym] = bundle
+
+    missing = [s for s in symbols_to_fetch if s not in bundles]
+    if missing:
+        log.info("Retrying %d straggler symbol(s) serially: %s", len(missing), ", ".join(missing))
+        for sym in missing:
+            bundle = fetch_all_candles(sym)
+            if bundle:
+                bundles[sym] = bundle
+                log.info("Straggler retry recovered %s", sym)
             else:
                 log.info("No candle bundle for %s this scan.", sym)
+
     log.info("Prefetched %d/%d symbol bundles in %.1fs",
               len(bundles), len(symbols_to_fetch), time.monotonic() - t_start)
 
