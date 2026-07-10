@@ -3,6 +3,9 @@ on:
   workflow_dispatch:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+concurrency:
+  group: axis-scheduled-task
+  cancel-in-progress: false
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -23,13 +26,12 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
         run: python core.py
-
       - name: Persist state
         if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin ${{ github.ref_name }} || true
-          git add state.json || true
+          git add state.json candle_cache.json || true
           git diff --staged --quiet || git commit -m "chore: update state [skip ci]"
           git push || true
