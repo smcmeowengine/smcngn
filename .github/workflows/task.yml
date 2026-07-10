@@ -31,7 +31,15 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin ${{ github.ref_name }} || true
           git add state.json candle_cache.json || true
-          git diff --staged --quiet || git commit -m "chore: update state [skip ci]"
-          git push || true
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: update state [skip ci]"
+            for i in 1 2 3; do
+              git pull --rebase origin ${{ github.ref_name }} && \
+              git push origin HEAD:${{ github.ref_name }} && break
+              echo "Push attempt $i failed, retrying..."
+              sleep 5
+            done
+          else
+            echo "No changes to state.json/candle_cache.json, nothing to commit."
+          fi
