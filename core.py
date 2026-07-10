@@ -609,9 +609,10 @@ def _default_state() -> dict:
         "pathway_weights": {
             "liquidity_reversal": 1.0, "trend_continuation": 1.0, "momentum_breakout": 1.0,
         },
+        "symbol_weights": {},
         "corr_returns": {},
         "last_summary_ts": 0,
-        "meta": {"version": "2.1.0", "created": int(time.time())},
+        "meta": {"version": "2.2.0", "created": int(time.time())},
     }
 
 
@@ -799,12 +800,21 @@ def select_combo(regime: RegimeVector) -> str:
     return "intraday"
 
 
-def adaptive_thresholds(regime: RegimeVector, base_threshold: float) -> float:
+def adaptive_thresholds(regime: RegimeVector, base_threshold: float, combo_name: str | None = None) -> float:
     """Nudge the base (governor-controlled) threshold up in noisy/choppy
     conditions and slightly down in clean, favorable ones -- bounded so the
     governor still owns the long-run level."""
     fav = regime.composite_favorability()
     adj = (0.5 - fav) * 10.0  # favorable (fav>0.5) lowers bar, unfavorable raises it
+    # "intraday" is select_combo()'s default/catch-all: any regime that isn't
+    # clearly high-vol/high-ADX (-> scalp) or clearly low-vol/low-ADX (-> swing)
+    # falls here. state.json history shows this bucket is genuinely weaker
+    # (33% win rate, -0.28R average over 48 closed trades) than scalp (58% WR,
+    # +0.44R avg) -- consistent with "ambiguous regime" being lower-edge by
+    # nature, not a scoring artifact. Hold intraday candidates to a higher bar
+    # rather than pretending they deserve the same threshold as a clean regime.
+    if combo_name == "intraday":
+        adj += 4.0
     return max(GOVERNOR_FLOOR, min(GOVERNOR_CEIL, base_threshold + adj))
 
 
@@ -1375,8 +1385,50 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
     pathway_weight = state["pathway_weights"].get(cand.pathway, 1.0)
     z += 2.8 * (pathway_weight - 1.0)
 
+    # Same idea, per-symbol: a symbol on a genuine cold streak (thin book,
+    # a level that keeps getting swept, chronic slippage) gets penalized
+    # independent of which pathway flagged it.
+    symbol_weight = state.get("symbol_weights", {}).get(cand.symbol, 1.0)
+    z += 2.2 * (symbol_weight - 1.0)
+
     confidence = 100 * logistic(z)
     return round(confidence, 2)
+
+
+SYMBOL_WEIGHT_MIN, SYMBOL_WEIGHT_MAX = 0.70, 1.15
+SYMBOL_WEIGHT_LEARNING_RATE = 0.05
+SYMBOL_MIN_SAMPLE = 5
+
+def tune_symbol_weights(state: dict):
+    """Same shrink-toward-neutral self-tuning as tune_pathway_weights(), but
+    per-symbol. state.json history showed a handful of symbols (APT, ZEC,
+    BCH, AAVE) posting sharply negative expectancy over their last 5-10
+    closed trades while carrying full confidence weight identical to
+    consistently profitable symbols (PENDLE, UNI, DOT). This lets the
+    scorer down-weight a symbol's own recent track record instead of only
+    reacting at the pathway level, which is too coarse to catch
+    symbol-specific edge decay (e.g. thin order books, chronic slippage,
+    a level that keeps getting swept)."""
+    weights = state.setdefault("symbol_weights", {})
+    history = state["signal_history"]
+    by_symbol: dict[str, list[dict]] = {}
+    for h in history:
+        if h.get("result") in ("win", "loss"):
+            by_symbol.setdefault(h["symbol"], []).append(h)
+    for symbol, trades in by_symbol.items():
+        if len(trades) < SYMBOL_MIN_SAMPLE:
+            continue
+        recent = trades[-20:]
+        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
+        avg_r = sum(h.get("r_realized", 0) for h in recent) / len(recent)
+        # Blend win-rate and realized R so a high win-rate/low-R symbol
+        # (small wins, occasional large losses -- see momentum_breakout)
+        # doesn't get treated the same as genuine edge.
+        target = 0.85 + 0.4 * wr + 0.15 * max(-1.0, min(1.0, avg_r))
+        target = max(SYMBOL_WEIGHT_MIN, min(SYMBOL_WEIGHT_MAX, target))
+        current = weights.get(symbol, 1.0)
+        weights[symbol] = current + SYMBOL_WEIGHT_LEARNING_RATE * (target - current)
+        weights[symbol] = max(SYMBOL_WEIGHT_MIN, min(SYMBOL_WEIGHT_MAX, weights[symbol]))
 
 
 def tune_pathway_weights(state: dict):
@@ -1465,18 +1517,48 @@ def build_correlation_clusters(bundles: dict[str, dict]) -> list[set[str]]:
 
 
 def dedup_correlated(ranked: list[dict], clusters: list[set[str]]) -> list[dict]:
+    """Keeps at most one candidate per correlated cluster, regardless of
+    direction. Keying on (cluster, direction) instead of cluster alone was
+    a known bug carried over from Kestrel/Helios: it let two symbols in the
+    same >=0.72-correlated cluster fire in OPPOSITE directions, since each
+    direction got its own dedup slot. That's not diversification -- it's
+    the engine betting against itself on the same underlying move. Keying
+    on cluster alone means only the single highest-confidence candidate in
+    a correlated cluster survives, no matter which direction it's in."""
     def cluster_of(sym: str) -> frozenset:
         for c in clusters:
             if sym in c:
                 return frozenset(c)
         return frozenset({sym})
 
-    seen: dict[tuple, dict] = {}
+    seen: dict[frozenset, dict] = {}
     for r in ranked:
-        key = (cluster_of(r["symbol"]), r["direction"])
+        key = cluster_of(r["symbol"])
         if key not in seen or r["confidence"] > seen[key]["confidence"]:
             seen[key] = r
     return list(seen.values())
+
+
+def conflicts_with_open_positions(state: dict, symbol: str, direction: str,
+                                   clusters: list[set[str]]) -> bool:
+    """The same cluster-direction bug also existed one level up: dedup_correlated
+    only ever compared candidates that fired in the SAME scan. A new candidate
+    correlated with an already-OPEN position from a prior scan, in the
+    opposite direction, was never checked at all. This closes that gap by
+    checking new candidates against currently active_signals too."""
+    def cluster_of(sym: str) -> frozenset:
+        for c in clusters:
+            if sym in c:
+                return frozenset(c)
+        return frozenset({sym})
+
+    target_cluster = cluster_of(symbol)
+    for sig in state.get("active_signals", []):
+        if sig["symbol"] == symbol:
+            continue  # same-symbol cap handled separately (MAX_CONCURRENT_PER_SYMBOL)
+        if cluster_of(sig["symbol"]) == target_cluster and sig["direction"] != direction:
+            return True
+    return False
 
 
 # ============================================================================
@@ -1822,7 +1904,7 @@ def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_s
     per-symbol fetch+scoring work here is safe to run concurrently."""
     regime = build_regime_vector(state, symbol, bundle, btc_bias, btc_strength, breadth, COMBOS["intraday"])
     combo_name = select_combo(regime)
-    local_threshold = adaptive_thresholds(regime, threshold)
+    local_threshold = adaptive_thresholds(regime, threshold, combo_name)
     combo = COMBOS[combo_name]
 
     bar_index = bundle[combo["exec"]][-1]["t"] // TF_MS[combo["exec"]]
@@ -1913,6 +1995,7 @@ def run_scan():
     log.info("BTC regime: %s (ADX %.1f) | breadth %.0f%%", btc_bias, btc_strength, breadth * 100)
 
     tune_pathway_weights(state)
+    tune_symbol_weights(state)
 
     fired = []
     threshold = state["governor"]["threshold"]
@@ -1933,14 +2016,29 @@ def run_scan():
 
     # Correlation dedup pass across everything that qualified this scan,
     # reusing the already-fetched bundles instead of re-hitting the API.
+    # Clusters are built from the full watchlist bundle set (not just symbols
+    # that fired) so that currently-open positions -- which may not have
+    # fired this scan -- are still covered by the cross-scan check below.
+    clusters = build_correlation_clusters(bundles) if bundles else []
     if len(fired) > 1:
-        corr_bundles = {r["cand"].symbol: bundles[r["cand"].symbol] for r in fired}
-        clusters = build_correlation_clusters(corr_bundles)
         ranked = [{"symbol": r["cand"].symbol, "direction": r["cand"].direction,
                    "confidence": r["confidence"], "ref": r} for r in fired]
         kept = dedup_correlated(ranked, clusters)
         kept_ids = {id(k["ref"]) for k in kept}
         fired = [r for r in fired if id(r) in kept_ids]
+
+    # Cross-scan correlation check: block a new candidate that's correlated
+    # with an already-OPEN position in the opposite direction. dedup_correlated
+    # above only ever compared candidates from the same scan; a position opened
+    # three scans ago was invisible to it.
+    still_fired = []
+    for r in fired:
+        if conflicts_with_open_positions(state, r["cand"].symbol, r["cand"].direction, clusters):
+            log.info("Skipping %s %s: correlated with an open position in the opposite direction",
+                      r["cand"].symbol, r["cand"].direction)
+            continue
+        still_fired.append(r)
+    fired = still_fired
 
     sent = 0
     for r in fired:
