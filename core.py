@@ -2,13 +2,12 @@
 """
 AXIS ENGINE v2.1.0
 ==================
-Ground-up institutional-grade multi-timeframe SMC/ICT crypto perpetual
-signal engine for Hyperliquid, synthesized from Crucible Alpha, Meridian,
-Nyx, Vectis, and the scalp_swing_bot lineage -- plus original additions:
+Institutional-grade multi-timeframe SMC/ICT crypto perpetual signal engine
+for Hyperliquid.
 
+Key components:
   - Three-Pathway Confluence Router (Liquidity Reversal / Trend Continuation
-    / Momentum Breakout) scored through one unified logistic model instead
-    of separate ad-hoc scorers per pathway.
+    / Momentum Breakout) scored through one unified logistic model.
   - Adaptive Frequency Governor: nudges the acceptance threshold toward a
     5-10 signal/day band using a slow, rate-limited EMA of daily signal
     count, so it reacts to sustained conditions, not scan-to-scan noise.
@@ -24,24 +23,12 @@ Nyx, Vectis, and the scalp_swing_bot lineage -- plus original additions:
     structure with an ATR floor; targets are clipped to the nearest real
     opposing liquidity pool / order block / volume-profile value-area edge
     rather than a blind R-multiple.
-
-v2.1.0 ports three pieces from the Helios v1.0 lineage that this engine
-didn't have:
-  1. Session Volume Profile (POC / Value Area / VWAP): folded into TP
-     clipping alongside the existing swing-derived liquidity pools, and
-     into scoring as a VWAP-alignment confluence. Previously TP targets
-     were clipped only to swing highs/lows, which misses real
-     volume-built support/resistance that never happened to coincide with
-     a swing point.
-  2. Regularized self-tuning pathway weights: replaces the old raw,
-     unsmoothed win-rate readout in scoring with a bounded multiplier per
-     pathway that drifts slowly toward its recent win-rate, shrunk toward
-     a neutral prior so a short streak can't overfit the engine.
-  3. Market breadth gate: the regime vector now carries the cross-
-     sectional fraction of the watchlist whose own 1h trend agrees with
-     BTC's regime bias, feeding both the adaptive threshold and per-
-     candidate regime fit -- so a signal is graded with awareness of
-     whether the rest of the market is confirming the move.
+  - Session Volume Profile (POC / Value Area / VWAP), folded into TP
+    clipping alongside swing-derived liquidity pools and into scoring as a
+    VWAP-alignment confluence.
+  - Market breadth gate: the regime vector carries the cross-sectional
+    fraction of the watchlist whose own 1h trend agrees with BTC's regime
+    bias, feeding both the adaptive threshold and per-candidate regime fit.
 
 Single file, immediately runnable. Scan-per-run model: an external
 scheduler (cron-job.org, GitHub Actions cron, systemd timer, etc.) invokes
@@ -51,8 +38,6 @@ the script; there is no long-running process and no database.
 Configure via environment variables (see CONFIGURATION below) and run:
 
     python3 axis_engine_v2_1_0.py
-
-Author: AXIS ENGINE project
 """
 
 from __future__ import annotations
@@ -61,6 +46,7 @@ import collections
 import json
 import math
 import os
+import re
 import signal
 import statistics
 import threading
@@ -98,16 +84,15 @@ WATCHLIST = [
 # one per symbol per scan based on the symbol's own volatility/ADX profile
 # rather than using a single fixed combo for the whole watchlist.
 COMBOS = {
-    "scalp":    {"bias": "1h", "struct": "15m", "exec": "5m",  "hold_hint": "0.5-4h"},
     "intraday": {"bias": "4h", "struct": "1h",  "exec": "15m", "hold_hint": "4-24h"},
     "swing":    {"bias": "1d", "struct": "4h",  "exec": "1h",  "hold_hint": "1-5d"},
 }
 
 TF_MS = {
-    "5m": 5 * 60_000, "15m": 15 * 60_000, "1h": 60 * 60_000,
+    "15m": 15 * 60_000, "1h": 60 * 60_000,
     "4h": 4 * 60 * 60_000, "1d": 24 * 60 * 60_000,
 }
-CANDLE_COUNT = {"5m": 300, "15m": 300, "1h": 300, "4h": 240, "1d": 180}
+CANDLE_COUNT = {"15m": 300, "1h": 300, "4h": 240, "1d": 180}
 
 ATR_LEN = 14
 RSI_LEN = 14
@@ -115,10 +100,10 @@ ADX_LEN = 14
 EMA_FAST, EMA_SLOW, EMA_TREND = 20, 50, 200
 BB_LEN, BB_MULT = 20, 2.0
 
-# --- Session Volume Profile (ported from Helios v1.0) ----------------------
+# --- Session Volume Profile -------------------------------------------
 # Volume-at-price model (POC / Value Area / VWAP) computed once per symbol
-# per scan from recent 1h candles. Feeds TP clipping alongside the existing
-# swing-derived liquidity pools, and a VWAP-alignment confluence in scoring.
+# per scan from recent 1h candles. Feeds TP clipping and a VWAP-alignment
+# confluence in scoring.
 VOL_PROFILE_BINS = 24
 VOL_PROFILE_LOOKBACK_BARS = 96   # ~4 days of 1h bars as the "session" profile
 
@@ -130,21 +115,19 @@ GOVERNOR_FLOOR = 54.0
 GOVERNOR_CEIL = 88.0
 GOVERNOR_MIN_INTERVAL_S = 3600  # rate-limit threshold nudges to once/hour
 
-# --- Self-tuning pathway weights (ported from Helios v1.0) ------------------
-# Replaces the old raw win-rate readout in score_candidate (which pulled the
-# unsmoothed pathway win-rate straight off history every scan) with a
-# regularized version: each pathway's multiplier drifts slowly toward a
-# win-rate-implied target, shrunk toward the neutral prior of 1.0 and
-# bounded, so a short hot/cold streak can't swing scoring on its own.
+# --- Self-tuning pathway weights --------------------------------------------
+# Each pathway's multiplier drifts slowly toward a win-rate-implied target,
+# shrunk toward the neutral prior of 1.0 and bounded, so a short hot/cold
+# streak can't swing scoring on its own.
 PATHWAY_WEIGHT_LEARNING_RATE = 0.04
 PATHWAY_WEIGHT_MIN, PATHWAY_WEIGHT_MAX = 0.75, 1.30
 
 # --- Setup Grade -> risk sizing hint (percent of equity), informational ---
 GRADE_SIZE_TABLE = {
-    ("A+", "scalp"): 1.00, ("A+", "intraday"): 1.25, ("A+", "swing"): 1.50,
-    ("A",  "scalp"): 0.75, ("A",  "intraday"): 1.00, ("A",  "swing"): 1.25,
-    ("B",  "scalp"): 0.50, ("B",  "intraday"): 0.65, ("B",  "swing"): 0.85,
-    ("C",  "scalp"): 0.25, ("C",  "intraday"): 0.35, ("C",  "swing"): 0.45,
+    ("A+", "intraday"): 1.25, ("A+", "swing"): 1.50,
+    ("A",  "intraday"): 1.00, ("A",  "swing"): 1.25,
+    ("B",  "intraday"): 0.65, ("B",  "swing"): 0.85,
+    ("C",  "intraday"): 0.35, ("C",  "swing"): 0.45,
 }
 
 MAX_CONCURRENT_PER_SYMBOL = 1
@@ -153,16 +136,15 @@ COOLDOWN_BARS = 6
 DEDUP_PRICE_TOL_PCT = 0.0025
 DEDUP_TIME_WINDOW_HOURS = 48
 
-POI_ATR_MULT = {"scalp": 0.5, "intraday": 0.65, "swing": 0.85}
+POI_ATR_MULT = {"intraday": 0.65, "swing": 0.85}
 POI_MAX_PCT_OF_PRICE = 0.008
 
 # --- Network performance / rate-limit handling ------------------------------
-# Hyperliquid's public info endpoint rate-limits bursts; fetching 5
-# timeframes x 25 symbols serially was the main source of both the 429s and
-# the >60s scan time. A shared, WEIGHT-aware pacer caps aggregate request
-# *weight* (not raw request count) across all threads, and a bounded thread
-# pool fetches symbols concurrently so wall-clock time is dominated by the
-# slowest single request, not the sum.
+# Hyperliquid's public info endpoint rate-limits bursts. A shared,
+# WEIGHT-aware pacer caps aggregate request *weight* (not raw request
+# count) across all threads, and a bounded thread pool fetches symbols
+# concurrently so wall-clock time is dominated by the slowest single
+# request, not the sum.
 #
 # Real limits per Hyperliquid docs (rate-limits-and-user-limits, per IP):
 #   - Aggregate REST weight budget: 1200/minute.
@@ -172,9 +154,6 @@ POI_MAX_PCT_OF_PRICE = 0.008
 #   - candleSnapshot carries an ADDITIONAL weight per 60 items returned.
 #     The docs don't give the exact scaling curve, so we assume the
 #     conservative (over-counting) case: weight = 20 * ceil(bars / 60).
-#     A 300-bar pull is therefore treated as weight 100, not 20 -- this is
-#     the actual gap: request-count pacing assumed every candleSnapshot
-#     cost the same as a cheap endpoint, when it doesn't.
 HL_WEIGHT_BUDGET_PER_MINUTE = 1000.0  # headroom under the real 1200/min cap
 HL_ENDPOINT_BASE_WEIGHT = {
     "l2Book": 2, "allMids": 2, "clearinghouseState": 2, "orderStatus": 2,
@@ -186,12 +165,8 @@ FETCH_THREAD_WORKERS = 6
 
 # Trend-continuation pathway tuning
 TREND_ADX_MIN = 20.0
-# RSI must dip into a real pullback zone, THEN turn back out past a level
-# stricter than the dip (confirming momentum actually resumed -- not just
-# "not still falling"). Previously TURN was inverted to sit *inside* the
-# DIP threshold (40 < 45 for longs), so almost any shallow dip-and-flatten
-# satisfied the check without a genuine bounce, which is why this pathway
-# was firing on setups that kept sliding instead of resuming the trend.
+# RSI must dip into a real pullback zone, then turn back out past a level
+# stricter than the dip, confirming momentum actually resumed.
 RSI_DIP_LONG, RSI_TURN_LONG = 40.0, 45.0
 RSI_DIP_SHORT, RSI_TURN_SHORT = 60.0, 55.0
 RSI_RESET_LOOKBACK = 8
@@ -260,7 +235,7 @@ class _WeightRateLimiter:
                     self.events.append((now, weight))
                     return
                 # Not enough budget yet -- sleep until the oldest event
-                # ages out of the window, then re-check.
+                # ages out of the window.
                 sleep_for = max(0.05, self.events[0][0] + self.window_s - now)
             time.sleep(min(sleep_for, 2.0))
 
@@ -386,7 +361,7 @@ def fetch_all_candles(symbol: str, candle_cache: dict[str, dict] | None = None,
                        reference_ms: int | None = None) -> dict[str, list[dict]] | None:
     bundle = {}
     sym_cache = (candle_cache or {}).get(symbol, {})
-    for tf in ("5m", "15m", "1h", "4h", "1d"):
+    for tf in ("15m", "1h", "4h", "1d"):
         cache_entry = sym_cache.get(tf)
         candles = get_candles(symbol, tf, CANDLE_COUNT[tf], reference_ms, cache_entry)
         if len(candles) < 60:
@@ -698,12 +673,12 @@ class RegimeVector:
     adx_bias: float
     session_weight: float
     noise_index: float
-    breadth: float   # 0..1, % of watchlist whose own 1h trend agrees with btc_bias (ported from Helios v1.0)
+    breadth: float   # 0..1, % of watchlist whose own 1h trend agrees with btc_bias
 
     def composite_favorability(self) -> float:
-        # Higher is more favorable for taking signals (clean trend, decent
-        # liquidity, not chaotic noise, and now: the rest of the market
-        # actually agreeing with BTC rather than BTC moving in isolation).
+        # Higher is more favorable for taking signals: clean trend, decent
+        # liquidity, not chaotic noise, and the rest of the market agreeing
+        # with BTC rather than BTC moving in isolation.
         trend_component = min(self.adx_bias / 35.0, 1.0)
         noise_penalty = max(0.0, 1.0 - self.noise_index)
         return round(
@@ -767,8 +742,7 @@ def compute_noise_index(candles: list[dict], lookback: int = 30) -> float:
 def symbol_bias_from_bundle(bundle: dict) -> str | None:
     """Lightweight 1h EMA20/EMA50 bias read for the market-breadth gate,
     reusing an already-fetched candle bundle instead of firing a dedicated
-    request per symbol (ported from Helios v1.0's quick_bias_scan, adapted
-    since Axis already prefetches every symbol's bundle up front)."""
+    request per symbol."""
     candles = bundle.get("1h")
     if not candles or len(candles) < EMA_SLOW + 5:
         return None
@@ -778,10 +752,10 @@ def symbol_bias_from_bundle(bundle: dict) -> str | None:
 
 
 def compute_breadth(bundles: dict[str, dict], btc_bias: str) -> float:
-    """Cross-sectional market-breadth gate (ported from Helios v1.0): the
-    fraction of the watchlist whose own 1h trend agrees with BTC's regime
-    bias. A neutral BTC bias (no clear stack alignment) makes "agreement"
-    undefined, so this falls back to a neutral 0.5 read in that case too."""
+    """Cross-sectional market-breadth gate: the fraction of the watchlist
+    whose own 1h trend agrees with BTC's regime bias. A neutral BTC bias
+    (no clear stack alignment) makes "agreement" undefined, so this falls
+    back to a neutral 0.5 read in that case too."""
     if btc_bias not in ("bullish", "bearish") or not bundles:
         return 0.5
     biases = [b for b in (symbol_bias_from_bundle(bundle) for bundle in bundles.values()) if b is not None]
@@ -805,12 +779,10 @@ def build_regime_vector(state: dict, symbol: str, bundle: dict, btc_bias: str,
 
 
 def select_combo(regime: RegimeVector) -> str:
-    """Route to the timeframe combo that fits current conditions: high
-    vol/high ADX favors faster scalp reads before the move exhausts; low
+    """Route to the timeframe combo that fits current conditions: low
     vol/low ADX favors the swing combo, which needs less frequent
-    confirmation and rides out chop on a higher timeframe."""
-    if regime.vol_pctile > 0.7 and regime.adx_bias > 25:
-        return "scalp"
+    confirmation and rides out chop on a higher timeframe; everything
+    else uses the intraday combo."""
     if regime.vol_pctile < 0.3 and regime.adx_bias < 18:
         return "swing"
     return "intraday"
@@ -1070,15 +1042,11 @@ def clamp_candidate_to_market(cand: "Candidate", market_price: float) -> "Candid
 
 def volume_profile(candles: list[dict], bins: int = VOL_PROFILE_BINS) -> dict:
     """Session volume profile -> POC (point of control), value-area
-    high/low, and session VWAP (ported from Helios v1.0). This is a proper
-    volume-at-price read rather than inferring support/resistance from
-    candle wicks alone: it buckets the (h+l+c)/3 typical price of each bar
-    by traded volume, takes the highest-volume bucket as the POC, then
-    expands outward bucket-by-bucket (always toward whichever side has more
+    high/low, and session VWAP. Buckets the (h+l+c)/3 typical price of each
+    bar by traded volume, takes the highest-volume bucket as the POC, then
+    expands outward bucket-by-bucket (toward whichever side has more
     volume) until 70% of total volume is enclosed -- that span is the value
-    area. Used downstream to clip TP targets to real volume-built levels
-    (alongside the existing swing-derived liquidity pools) and as a VWAP
-    confluence check in scoring."""
+    area."""
     hi = max(c["h"] for c in candles)
     lo = min(c["l"] for c in candles)
     if hi <= lo:
@@ -1113,9 +1081,9 @@ def _clip_tp_to_liquidity(entry: float, tp: float, direction: str, pools: dict,
                            vp: dict | None = None) -> float:
     targets = pools["resistance"] if direction == "long" else pools["support"]
     candidates = [lv for lv, _ in targets if (lv > entry if direction == "long" else lv < entry)]
-    # Volume-profile value-area edges + POC (ported from Helios v1.0): real
-    # volume-built levels the swing-only pools above can miss entirely when
-    # the market built out participation somewhere price never wicked to.
+    # Volume-profile value-area edges + POC: real volume-built levels the
+    # swing-only pools above can miss when the market built out
+    # participation somewhere price never wicked to.
     if vp:
         candidates += [lv for lv in (vp["poc"], vp["vah"], vp["val"])
                        if (lv > entry if direction == "long" else lv < entry)]
@@ -1381,21 +1349,18 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
     else:
         z -= 0.6 * imbalance
 
-    # Session VWAP alignment (ported from Helios v1.0): being on the "right
-    # side" of session VWAP for the trade direction is a session-level
-    # confluence the swing/structure checks above don't capture on their
-    # own. Asymmetric like Helios's version -- aligned is rewarded more
-    # than misaligned is punished, since VWAP position is a soft confluence
-    # rather than a hard invalidation signal.
+    # Session VWAP alignment: being on the "right side" of session VWAP for
+    # the trade direction is a session-level confluence the swing/structure
+    # checks above don't capture on their own. Asymmetric -- aligned is
+    # rewarded more than misaligned is punished, since VWAP position is a
+    # soft confluence rather than a hard invalidation signal.
     if vp:
         vwap_aligned = (cand.entry >= vp["vwap"]) if cand.direction == "long" else (cand.entry <= vp["vwap"])
         z += 0.4 if vwap_aligned else -0.25
 
-    # Regularized self-tuning pathway weight (ported from Helios v1.0):
-    # replaces the old raw win-rate readout with a bounded multiplier that
-    # tune_pathway_weights() drifts slowly toward the pathway's recent
-    # win-rate, shrunk toward the neutral prior of 1.0. Centering on the
-    # neutral prior means a pathway with no edge yet contributes zero shift.
+    # Regularized self-tuning pathway weight: tune_pathway_weights() drifts
+    # this slowly toward the pathway's recent win-rate, shrunk toward the
+    # neutral prior of 1.0. A pathway with no edge yet contributes zero shift.
     pathway_weight = state["pathway_weights"].get(cand.pathway, 1.0)
     z += 2.8 * (pathway_weight - 1.0)
 
@@ -1406,10 +1371,10 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
 def tune_pathway_weights(state: dict):
     """Nudges each pathway's scoring multiplier toward its recent win-rate,
     shrunk toward the neutral prior (1.0) so a short streak can't push the
-    engine into an overfit corner (ported from Helios v1.0). Bounds are
-    tight (PATHWAY_WEIGHT_MIN..MAX) and the step size is small, so weights
-    drift slowly instead of snapping to whatever the last few outcomes
-    happened to be."""
+    engine into an overfit corner. Bounds are tight
+    (PATHWAY_WEIGHT_MIN..MAX) and the step size is small, so weights drift
+    slowly instead of snapping to whatever the last few outcomes happened
+    to be."""
     weights = state.setdefault("pathway_weights", {
         "liquidity_reversal": 1.0, "trend_continuation": 1.0, "momentum_breakout": 1.0,
     })
@@ -1570,6 +1535,29 @@ def estimate_signals_last_24h(state: dict) -> int:
 # TELEGRAM
 # ============================================================================
 
+_TG_MD_SPECIAL = re.compile(r"([_*`\[])")
+
+
+def tg_escape(value) -> str:
+    """Escape characters that carry special meaning in Telegram's legacy
+    `parse_mode: "Markdown"` (V1): `_` `*` `` ` `` `[`.
+
+    Apply this to any data-derived string (symbol names, pathway/enum
+    values, free-text confluence notes, etc.) before it's dropped into a
+    message as *plain* text. A single unmatched `_` or `*` makes Telegram's
+    entity parser fail with "Can't parse entities" and the whole send gets
+    rejected with HTTP 400 -- that's what happened when an odd number of
+    underscore-containing pathway names landed in the daily summary.
+
+    Don't use this on text that's deliberately being wrapped as an entity
+    itself (e.g. the `*bold*` / `` `code` `` markers we add on purpose) --
+    escape the *contents*, not the markers, and prefer wrapping in `` `code` ``
+    over escaping when the value should render as monospace anyway (that's
+    what fmt_px()'d numbers and the pathway name already do).
+    """
+    return _TG_MD_SPECIAL.sub(r"\\\1", str(value))
+
+
 def fmt_px(v: float) -> str:
     if v >= 100:
         return f"{v:,.2f}"
@@ -1587,7 +1575,7 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.1.0* -- {cand.symbol}/USD",
+        f"*AXIS ENGINE v2.1.0* -- {tg_escape(cand.symbol)}/USD",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -1596,10 +1584,10 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
         f"TP2:    `{fmt_px(cand.tp2)}`",
         f"R:R (TP2): `{cand.rr():.2f}`",
         f"Confidence: {confidence:.1f}%  {confidence_bar(confidence)}",
-        f"Est. hold: {duration}",
+        f"Est. hold: {tg_escape(duration)}",
         "",
         "Confluences:",
-    ] + [f"  \u2022 {c}" for c in cand.confluences]
+    ] + [f"  \u2022 {tg_escape(c)}" for c in cand.confluences]
     return "\n".join(lines)
 
 
@@ -1700,7 +1688,7 @@ def _sync_history(state: dict, sig: dict):
 
 def _notify_tp1(sig: dict, price: float):
     r = _r_multiple(sig, price)
-    text = (f"\U0001F525 *TP1 hit* -- {sig['symbol']} {sig['direction'].upper()}\n"
+    text = (f"\U0001F525 *TP1 hit* -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
             f"Price: `{fmt_px(price)}`  |  +{r:.2f}R banked\n"
             f"SL moved to breakeven (`{fmt_px(sig['entry'])}`).")
     reply_telegram(text, sig.get("message_id"))
@@ -1725,7 +1713,7 @@ def _close_out(state: dict, sig: dict, result: str, price: float):
     else:
         headline = "\u274C *SL hit -- LOSS*"
         emoji = "\U0001F44E"
-    text = (f"{headline} -- {sig['symbol']} {sig['direction'].upper()}\n"
+    text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
             f"Exit: `{fmt_px(price)}`  |  Result: {r:+.2f}R")
     reply_telegram(text, sig.get("message_id"))
     react_telegram(sig.get("message_id"), emoji)
@@ -1791,7 +1779,7 @@ def generate_daily_summary(state: dict) -> str:
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
             w = sum(1 for i in items if i["result"] == "win")
-            lines.append(f"  \u2022 {pw}: {w}/{len(items)} ({100*w/len(items):.0f}%)")
+            lines.append(f"  \u2022 `{pw}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
     return "\n".join(lines)
 
 
