@@ -154,7 +154,7 @@ POI_MAX_PCT_OF_PRICE = 0.008
 #   - candleSnapshot carries an ADDITIONAL weight per 60 items returned.
 #     The docs don't give the exact scaling curve, so we assume the
 #     conservative (over-counting) case: weight = 20 * ceil(bars / 60).
-HL_WEIGHT_BUDGET_PER_MINUTE = 1000.0  # headroom under the real 1200/min cap
+HL_WEIGHT_BUDGET_PER_MINUTE = 1100.0  # headroom under the real 1200/min cap
 HL_ENDPOINT_BASE_WEIGHT = {
     "l2Book": 2, "allMids": 2, "clearinghouseState": 2, "orderStatus": 2,
     "spotClearinghouseState": 2, "exchangeStatus": 2,
@@ -330,12 +330,20 @@ def get_candles(symbol: str, interval: str, n: int, reference_ms: int | None = N
     watermark (minus a small overlap for safety) and merge, instead of
     re-requesting the full window. Falls back to a full-window fetch when
     there's no usable cache yet.
+
+    If not enough real time has passed for a new candle to have closed
+    since the last cached bar, skips the network call entirely and
+    returns the cached data as-is -- a 4h/1d timeframe re-fetched every
+    15 minutes would otherwise pay full API weight for a call that returns
+    no new bars almost every time.
     """
     reference_ms = reference_ms or int(time.time() * 1000)
 
     if cache_entry:
         step = TF_MS[interval]
         last_cached_t = cache_entry[-1]["t"]
+        if current_bar_open_ms(reference_ms, interval) <= last_cached_t + step:
+            return filter_closed_candles(cache_entry, interval, reference_ms)[-n:]
         start_ms = last_cached_t - step * CANDLE_DELTA_OVERLAP_BARS
         new_raw = _request_candles(symbol, interval, start_ms, reference_ms)
         if new_raw:
