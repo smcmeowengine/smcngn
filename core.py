@@ -84,15 +84,16 @@ WATCHLIST = [
 # one per symbol per scan based on the symbol's own volatility/ADX profile
 # rather than using a single fixed combo for the whole watchlist.
 COMBOS = {
+    "scalp":    {"bias": "1h", "struct": "15m", "exec": "5m",  "hold_hint": "0.5-4h"},
     "intraday": {"bias": "4h", "struct": "1h",  "exec": "15m", "hold_hint": "4-24h"},
     "swing":    {"bias": "1d", "struct": "4h",  "exec": "1h",  "hold_hint": "1-5d"},
 }
 
 TF_MS = {
-    "15m": 15 * 60_000, "1h": 60 * 60_000,
+    "5m": 5 * 60_000, "15m": 15 * 60_000, "1h": 60 * 60_000,
     "4h": 4 * 60 * 60_000, "1d": 24 * 60 * 60_000,
 }
-CANDLE_COUNT = {"15m": 300, "1h": 300, "4h": 240, "1d": 180}
+CANDLE_COUNT = {"5m": 300, "15m": 300, "1h": 300, "4h": 240, "1d": 180}
 
 ATR_LEN = 14
 RSI_LEN = 14
@@ -124,10 +125,10 @@ PATHWAY_WEIGHT_MIN, PATHWAY_WEIGHT_MAX = 0.75, 1.30
 
 # --- Setup Grade -> risk sizing hint (percent of equity), informational ---
 GRADE_SIZE_TABLE = {
-    ("A+", "intraday"): 1.25, ("A+", "swing"): 1.50,
-    ("A",  "intraday"): 1.00, ("A",  "swing"): 1.25,
-    ("B",  "intraday"): 0.65, ("B",  "swing"): 0.85,
-    ("C",  "intraday"): 0.35, ("C",  "swing"): 0.45,
+    ("A+", "scalp"): 1.00, ("A+", "intraday"): 1.25, ("A+", "swing"): 1.50,
+    ("A",  "scalp"): 0.75, ("A",  "intraday"): 1.00, ("A",  "swing"): 1.25,
+    ("B",  "scalp"): 0.50, ("B",  "intraday"): 0.65, ("B",  "swing"): 0.85,
+    ("C",  "scalp"): 0.25, ("C",  "intraday"): 0.35, ("C",  "swing"): 0.45,
 }
 
 MAX_CONCURRENT_PER_SYMBOL = 1
@@ -136,7 +137,7 @@ COOLDOWN_BARS = 6
 DEDUP_PRICE_TOL_PCT = 0.0025
 DEDUP_TIME_WINDOW_HOURS = 48
 
-POI_ATR_MULT = {"intraday": 0.65, "swing": 0.85}
+POI_ATR_MULT = {"scalp": 0.5, "intraday": 0.65, "swing": 0.85}
 POI_MAX_PCT_OF_PRICE = 0.008
 
 # --- Network performance / rate-limit handling ------------------------------
@@ -369,7 +370,7 @@ def fetch_all_candles(symbol: str, candle_cache: dict[str, dict] | None = None,
                        reference_ms: int | None = None) -> dict[str, list[dict]] | None:
     bundle = {}
     sym_cache = (candle_cache or {}).get(symbol, {})
-    for tf in ("15m", "1h", "4h", "1d"):
+    for tf in ("5m", "15m", "1h", "4h", "1d"):
         cache_entry = sym_cache.get(tf)
         candles = get_candles(symbol, tf, CANDLE_COUNT[tf], reference_ms, cache_entry)
         if len(candles) < 60:
@@ -787,10 +788,12 @@ def build_regime_vector(state: dict, symbol: str, bundle: dict, btc_bias: str,
 
 
 def select_combo(regime: RegimeVector) -> str:
-    """Route to the timeframe combo that fits current conditions: low
+    """Route to the timeframe combo that fits current conditions: high
+    vol/high ADX favors faster scalp reads before the move exhausts; low
     vol/low ADX favors the swing combo, which needs less frequent
-    confirmation and rides out chop on a higher timeframe; everything
-    else uses the intraday combo."""
+    confirmation and rides out chop on a higher timeframe."""
+    if regime.vol_pctile > 0.7 and regime.adx_bias > 25:
+        return "scalp"
     if regime.vol_pctile < 0.3 and regime.adx_bias < 18:
         return "swing"
     return "intraday"
