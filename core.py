@@ -57,6 +57,7 @@ Author: AXIS ENGINE project
 
 from __future__ import annotations
 
+import collections
 import json
 import math
 import os
@@ -158,10 +159,29 @@ POI_MAX_PCT_OF_PRICE = 0.008
 # --- Network performance / rate-limit handling ------------------------------
 # Hyperliquid's public info endpoint rate-limits bursts; fetching 5
 # timeframes x 25 symbols serially was the main source of both the 429s and
-# the >60s scan time. A shared token-bucket-style pacer caps request rate
-# across all threads, and a bounded thread pool fetches symbols concurrently
-# so wall-clock time is dominated by the slowest single request, not the sum.
-HL_MAX_REQUESTS_PER_SECOND = 8.0
+# the >60s scan time. A shared, WEIGHT-aware pacer caps aggregate request
+# *weight* (not raw request count) across all threads, and a bounded thread
+# pool fetches symbols concurrently so wall-clock time is dominated by the
+# slowest single request, not the sum.
+#
+# Real limits per Hyperliquid docs (rate-limits-and-user-limits, per IP):
+#   - Aggregate REST weight budget: 1200/minute.
+#   - Most `info` endpoints (incl. candleSnapshot base cost): weight 20.
+#   - l2Book/allMids/clearinghouseState/orderStatus/spotClearinghouseState/
+#     exchangeStatus: weight 2.
+#   - candleSnapshot carries an ADDITIONAL weight per 60 items returned.
+#     The docs don't give the exact scaling curve, so we assume the
+#     conservative (over-counting) case: weight = 20 * ceil(bars / 60).
+#     A 300-bar pull is therefore treated as weight 100, not 20 -- this is
+#     the actual gap: request-count pacing assumed every candleSnapshot
+#     cost the same as a cheap endpoint, when it doesn't.
+HL_WEIGHT_BUDGET_PER_MINUTE = 1000.0  # headroom under the real 1200/min cap
+HL_ENDPOINT_BASE_WEIGHT = {
+    "l2Book": 2, "allMids": 2, "clearinghouseState": 2, "orderStatus": 2,
+    "spotClearinghouseState": 2, "exchangeStatus": 2,
+    "userRole": 60,
+}
+HL_DEFAULT_INFO_WEIGHT = 20
 FETCH_THREAD_WORKERS = 6
 
 # Trend-continuation pathway tuning
@@ -216,25 +236,52 @@ def hl_coin(symbol: str) -> str:
     return symbol.upper()
 
 
-class _RateLimiter:
-    """Minimum-interval pacer shared across all threads so concurrent
-    fetches don't burst past Hyperliquid's rate limit."""
+class _WeightRateLimiter:
+    """Sliding-60s-window pacer shared across all threads. Tracks aggregate
+    request WEIGHT (not request count) so a burst of heavy candleSnapshot
+    calls is paced the same as Hyperliquid actually bills it, instead of
+    being paced as if every request cost the same as a cheap one."""
 
-    def __init__(self, max_per_second: float):
-        self.min_interval = 1.0 / max_per_second
+    def __init__(self, budget_per_minute: float):
+        self.budget = budget_per_minute
+        self.window_s = 60.0
         self.lock = threading.Lock()
-        self.last_call = 0.0
+        self.events: collections.deque[tuple[float, float]] = collections.deque()
 
-    def wait(self):
-        with self.lock:
-            now = time.monotonic()
-            elapsed = now - self.last_call
-            if elapsed < self.min_interval:
-                time.sleep(self.min_interval - elapsed)
-            self.last_call = time.monotonic()
+    def wait(self, weight: float):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                cutoff = now - self.window_s
+                while self.events and self.events[0][0] < cutoff:
+                    self.events.popleft()
+                used = sum(w for _, w in self.events)
+                if used + weight <= self.budget:
+                    self.events.append((now, weight))
+                    return
+                # Not enough budget yet -- sleep until the oldest event
+                # ages out of the window, then re-check.
+                sleep_for = max(0.05, self.events[0][0] + self.window_s - now)
+            time.sleep(min(sleep_for, 2.0))
 
 
-_rate_limiter = _RateLimiter(HL_MAX_REQUESTS_PER_SECOND)
+_rate_limiter = _WeightRateLimiter(HL_WEIGHT_BUDGET_PER_MINUTE)
+
+
+def _request_weight(payload: dict) -> float:
+    """Estimate the Hyperliquid weight cost of a request. See constants
+    block above for the assumptions behind the candleSnapshot scaling."""
+    req_type = payload.get("type", "")
+    if req_type == "candleSnapshot":
+        req = payload.get("req", {})
+        interval = req.get("interval")
+        start_ms, end_ms = req.get("startTime"), req.get("endTime")
+        n_bars = 60  # conservative default if we can't compute the span
+        if interval in TF_MS and start_ms is not None and end_ms is not None:
+            step = TF_MS[interval]
+            n_bars = max(1, math.ceil((end_ms - start_ms) / step))
+        return HL_DEFAULT_INFO_WEIGHT * math.ceil(n_bars / 60)
+    return HL_ENDPOINT_BASE_WEIGHT.get(req_type, HL_DEFAULT_INFO_WEIGHT)
 
 
 def hl_post(payload: dict, retries: int = 4, timeout: int = 12) -> dict | list | None:
@@ -242,15 +289,20 @@ def hl_post(payload: dict, retries: int = 4, timeout: int = 12) -> dict | list |
     req = urllib.request.Request(
         HL_API_URL, data=body, headers={"Content-Type": "application/json"}
     )
+    weight = _request_weight(payload)
     for attempt in range(retries):
-        _rate_limiter.wait()
+        _rate_limiter.wait(weight)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
-                wait_s = float(retry_after) if retry_after else min(8.0, 0.8 * (2 ** attempt))
+                # Hyperliquid's docs note that once an address is rate
+                # limited, it's only allowed one request per 10s -- so
+                # the fallback floor here is 10s, not a short exp-backoff,
+                # since retrying faster than that will just 429 again.
+                wait_s = float(retry_after) if retry_after else 10.0
                 log.warning("hl_post 429 (attempt %d, type=%s), backing off %.1fs",
                             attempt + 1, payload.get("type"), wait_s)
                 time.sleep(wait_s)
@@ -1739,7 +1791,7 @@ def generate_daily_summary(state: dict) -> str:
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
             w = sum(1 for i in items if i["result"] == "win")
-            lines.append(f"  \u2022 {pw}: {w}/{len(items)} ({100*w/len(items):.0f}%)")
+            lines.append(f"  \u2022 `{pw}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
     return "\n".join(lines)
 
 
