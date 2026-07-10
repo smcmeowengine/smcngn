@@ -61,6 +61,7 @@ import collections
 import json
 import math
 import os
+import re
 import signal
 import statistics
 import threading
@@ -1570,6 +1571,29 @@ def estimate_signals_last_24h(state: dict) -> int:
 # TELEGRAM
 # ============================================================================
 
+_TG_MD_SPECIAL = re.compile(r"([_*`\[])")
+
+
+def tg_escape(value) -> str:
+    """Escape characters that carry special meaning in Telegram's legacy
+    `parse_mode: "Markdown"` (V1): `_` `*` `` ` `` `[`.
+
+    Apply this to any data-derived string (symbol names, pathway/enum
+    values, free-text confluence notes, etc.) before it's dropped into a
+    message as *plain* text. A single unmatched `_` or `*` makes Telegram's
+    entity parser fail with "Can't parse entities" and the whole send gets
+    rejected with HTTP 400 -- that's what happened when an odd number of
+    underscore-containing pathway names landed in the daily summary.
+
+    Don't use this on text that's deliberately being wrapped as an entity
+    itself (e.g. the `*bold*` / `` `code` `` markers we add on purpose) --
+    escape the *contents*, not the markers, and prefer wrapping in `` `code` ``
+    over escaping when the value should render as monospace anyway (that's
+    what fmt_px()'d numbers and the pathway name already do).
+    """
+    return _TG_MD_SPECIAL.sub(r"\\\1", str(value))
+
+
 def fmt_px(v: float) -> str:
     if v >= 100:
         return f"{v:,.2f}"
@@ -1587,7 +1611,7 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.1.0* -- {cand.symbol}/USD",
+        f"*AXIS ENGINE v2.1.0* -- {tg_escape(cand.symbol)}/USD",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -1596,10 +1620,10 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
         f"TP2:    `{fmt_px(cand.tp2)}`",
         f"R:R (TP2): `{cand.rr():.2f}`",
         f"Confidence: {confidence:.1f}%  {confidence_bar(confidence)}",
-        f"Est. hold: {duration}",
+        f"Est. hold: {tg_escape(duration)}",
         "",
         "Confluences:",
-    ] + [f"  \u2022 {c}" for c in cand.confluences]
+    ] + [f"  \u2022 {tg_escape(c)}" for c in cand.confluences]
     return "\n".join(lines)
 
 
@@ -1700,7 +1724,7 @@ def _sync_history(state: dict, sig: dict):
 
 def _notify_tp1(sig: dict, price: float):
     r = _r_multiple(sig, price)
-    text = (f"\U0001F525 *TP1 hit* -- {sig['symbol']} {sig['direction'].upper()}\n"
+    text = (f"\U0001F525 *TP1 hit* -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
             f"Price: `{fmt_px(price)}`  |  +{r:.2f}R banked\n"
             f"SL moved to breakeven (`{fmt_px(sig['entry'])}`).")
     reply_telegram(text, sig.get("message_id"))
@@ -1725,7 +1749,7 @@ def _close_out(state: dict, sig: dict, result: str, price: float):
     else:
         headline = "\u274C *SL hit -- LOSS*"
         emoji = "\U0001F44E"
-    text = (f"{headline} -- {sig['symbol']} {sig['direction'].upper()}\n"
+    text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
             f"Exit: `{fmt_px(price)}`  |  Result: {r:+.2f}R")
     reply_telegram(text, sig.get("message_id"))
     react_telegram(sig.get("message_id"), emoji)
