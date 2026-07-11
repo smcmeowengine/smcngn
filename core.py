@@ -1,43 +1,31 @@
 #!/usr/bin/env python3
 """
-AXIS ENGINE v2.2.0
+AXIS ENGINE v2.2.2
 ==================
-Institutional-grade multi-timeframe SMC/ICT crypto perpetual signal engine
-for Hyperliquid.
+Multi-timeframe SMC/ICT crypto perpetual signal engine for Hyperliquid.
 
 Key components:
   - Three-Pathway Confluence Router (Liquidity Reversal / Trend Continuation
     / Momentum Breakout) scored through one unified logistic model.
-  - Adaptive Frequency Governor: nudges the acceptance threshold toward a
-    5-10 signal/day band using a slow, rate-limited EMA of daily signal
-    count, so it reacts to sustained conditions, not scan-to-scan noise.
-  - Composite Regime Vector (BTC macro bias, symbol volatility percentile,
-    ADX trend strength, session liquidity weight, noise index, cross-
-    sectional market breadth) feeding both threshold selection AND
-    per-pathway eligibility.
-  - Correlation-cluster deduplication computed dynamically from realized
-    returns each run, not a static hand-maintained group table.
-  - Historical edge weighting: each candidate's confidence is nudged by a
-    regularized, self-tuning per-pathway weight.
-  - Structure-aware, liquidity-target TP/SL: stops sit beyond invalidation
-    structure with an ATR floor; targets are clipped to the nearest real
-    opposing liquidity pool / order block / volume-profile value-area edge
-    rather than a blind R-multiple.
-  - Session Volume Profile (POC / Value Area / VWAP), folded into TP
-    clipping alongside swing-derived liquidity pools and into scoring as a
-    VWAP-alignment confluence.
-  - Market breadth gate: the regime vector carries the cross-sectional
-    fraction of the watchlist whose own 1h trend agrees with BTC's regime
-    bias, feeding both the adaptive threshold and per-candidate regime fit.
+  - Adaptive Frequency Governor that nudges the acceptance threshold toward
+    a 5-10 signal/day band.
+  - Composite Regime Vector (BTC macro bias, volatility percentile, ADX,
+    session liquidity weight, noise index, market breadth) driving both
+    threshold selection and per-pathway eligibility.
+  - Dynamic correlation-cluster deduplication from realized returns.
+  - Self-tuning per-pathway/per-symbol confidence weighting from history.
+  - Structure-aware, liquidity-target TP/SL clipped to real liquidity
+    pools, order blocks, and volume-profile value-area edges.
+  - Session Volume Profile (POC / Value Area / VWAP) feeding TP clipping
+    and scoring.
 
 Single file, immediately runnable. Scan-per-run model: an external
-scheduler (cron-job.org, GitHub Actions cron, systemd timer, etc.) invokes
-this script every 15 minutes. All persistence lives in state.json next to
-the script; there is no long-running process and no database.
+scheduler (cron, GitHub Actions, systemd timer, etc.) invokes this script
+every 15 minutes. All persistence lives in state.json next to the script.
 
 Configure via environment variables (see CONFIGURATION below) and run:
 
-    python3 axis_engine_v2_2_0.py
+    python3 axis_engine_v2_2_2.py
 """
 
 from __future__ import annotations
@@ -59,9 +47,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+# --- CONFIGURATION ---
 
 HL_API_URL = "https://api.hyperliquid.xyz/info"
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
@@ -71,10 +57,7 @@ STATE_PATH = os.environ.get("AXIS_STATE_PATH", "state.json")
 LOCK_PATH = os.environ.get("AXIS_LOCK_PATH", "axis_engine.lock")
 LOG_PATH = os.environ.get("AXIS_LOG_PATH", "axis_engine.log")
 CANDLE_CACHE_PATH = os.environ.get("AXIS_CANDLE_CACHE_PATH", "candle_cache.json")
-# Extra closed bars re-requested past the cached watermark on every delta
-# fetch. Cheap insurance against Hyperliquid revising the last bar or two
-# after close, or the engine having missed a scan cycle.
-CANDLE_DELTA_OVERLAP_BARS = 3
+CANDLE_DELTA_OVERLAP_BARS = 3  # extra closed bars re-fetched past the cached watermark
 
 WATCHLIST = [
     "BTC", "ETH", "HYPE", "ZEC", "NEAR", "ONDO", "SUI", "PENGU", "BNB", "SOL",
@@ -82,9 +65,8 @@ WATCHLIST = [
     "XLM", "UNI", "LTC", "APT", "PENDLE",
 ]
 
-# Timeframe combos: (bias, structure, execution). The Regime Router picks
-# one per symbol per scan based on the symbol's own volatility/ADX profile
-# rather than using a single fixed combo for the whole watchlist.
+# Timeframe combos: (bias, structure, execution). Picked per symbol per
+# scan by the Regime Router based on the symbol's volatility/ADX profile.
 COMBOS = {
     "scalp":    {"bias": "1h", "struct": "15m", "exec": "5m",  "hold_hint": "0.5-4h"},
     "intraday": {"bias": "4h", "struct": "1h",  "exec": "15m", "hold_hint": "4-24h"},
@@ -97,16 +79,18 @@ TF_MS = {
 }
 CANDLE_COUNT = {"5m": 300, "15m": 300, "1h": 300, "4h": 240, "1d": 180}
 
+# SL/TP monitoring tests each closed 15m candle's high/low against active
+# levels (rather than just live mark price), so a wick that touches and
+# reverses between scans is still caught. 15m matches the scan cadence.
+MONITOR_TF = "15m"
+
 ATR_LEN = 14
 RSI_LEN = 14
 ADX_LEN = 14
 EMA_FAST, EMA_SLOW, EMA_TREND = 20, 50, 200
 BB_LEN, BB_MULT = 20, 2.0
 
-# --- Session Volume Profile -------------------------------------------
-# Volume-at-price model (POC / Value Area / VWAP) computed once per symbol
-# per scan from recent 1h candles. Feeds TP clipping and a VWAP-alignment
-# confluence in scoring.
+# Volume-at-price model (POC / Value Area / VWAP) from recent 1h candles.
 VOL_PROFILE_BINS = 24
 VOL_PROFILE_LOOKBACK_BARS = 96   # ~4 days of 1h bars as the "session" profile
 
@@ -118,10 +102,8 @@ GOVERNOR_FLOOR = 54.0
 GOVERNOR_CEIL = 88.0
 GOVERNOR_MIN_INTERVAL_S = 3600  # rate-limit threshold nudges to once/hour
 
-# --- Self-tuning pathway weights --------------------------------------------
 # Each pathway's multiplier drifts slowly toward a win-rate-implied target,
-# shrunk toward the neutral prior of 1.0 and bounded, so a short hot/cold
-# streak can't swing scoring on its own.
+# shrunk toward a neutral prior of 1.0 and bounded.
 PATHWAY_WEIGHT_LEARNING_RATE = 0.04
 PATHWAY_WEIGHT_MIN, PATHWAY_WEIGHT_MAX = 0.75, 1.30
 
@@ -142,21 +124,9 @@ DEDUP_TIME_WINDOW_HOURS = 48
 POI_ATR_MULT = {"scalp": 0.5, "intraday": 0.65, "swing": 0.85}
 POI_MAX_PCT_OF_PRICE = 0.008
 
-# --- Network performance / rate-limit handling ------------------------------
-# Hyperliquid's public info endpoint rate-limits bursts. A shared,
-# WEIGHT-aware pacer caps aggregate request *weight* (not raw request
-# count) across all threads, and a bounded thread pool fetches symbols
-# concurrently so wall-clock time is dominated by the slowest single
-# request, not the sum.
-#
-# Real limits per Hyperliquid docs (rate-limits-and-user-limits, per IP):
-#   - Aggregate REST weight budget: 1200/minute.
-#   - Most `info` endpoints (incl. candleSnapshot base cost): weight 20.
-#   - l2Book/allMids/clearinghouseState/orderStatus/spotClearinghouseState/
-#     exchangeStatus: weight 2.
-#   - candleSnapshot carries an ADDITIONAL weight per 60 items returned.
-#     The docs don't give the exact scaling curve, so we assume the
-#     conservative (over-counting) case: weight = 20 * ceil(bars / 60).
+# A shared weight-aware pacer caps aggregate request weight per Hyperliquid's
+# per-IP limit (1200/min); most `info` endpoints cost 20, a few cost 2, and
+# candleSnapshot scales as 20 * ceil(bars / 60).
 HL_WEIGHT_BUDGET_PER_MINUTE = 1100.0  # headroom under the real 1200/min cap
 HL_ENDPOINT_BASE_WEIGHT = {
     "l2Book": 2, "allMids": 2, "clearinghouseState": 2, "orderStatus": 2,
@@ -168,8 +138,7 @@ FETCH_THREAD_WORKERS = 6
 
 # Trend-continuation pathway tuning
 TREND_ADX_MIN = 20.0
-# RSI must dip into a real pullback zone, then turn back out past a level
-# stricter than the dip, confirming momentum actually resumed.
+# RSI must dip into a pullback zone, then turn back out past a stricter level.
 RSI_DIP_LONG, RSI_TURN_LONG = 40.0, 45.0
 RSI_DIP_SHORT, RSI_TURN_SHORT = 60.0, 55.0
 RSI_RESET_LOOKBACK = 8
@@ -206,19 +175,15 @@ signal.signal(signal.SIGTERM, _handle_shutdown)
 signal.signal(signal.SIGINT, _handle_shutdown)
 
 
-# ============================================================================
-# HYPERLIQUID API
-# ============================================================================
+# --- HYPERLIQUID API ---
 
 def hl_coin(symbol: str) -> str:
     return symbol.upper()
 
 
 class _WeightRateLimiter:
-    """Sliding-60s-window pacer shared across all threads. Tracks aggregate
-    request WEIGHT (not request count) so a burst of heavy candleSnapshot
-    calls is paced the same as Hyperliquid actually bills it, instead of
-    being paced as if every request cost the same as a cheap one."""
+    """Sliding-60s-window pacer shared across all threads, tracking request
+    weight (not count) so heavy calls are paced accordingly."""
 
     def __init__(self, budget_per_minute: float):
         self.budget = budget_per_minute
@@ -237,8 +202,7 @@ class _WeightRateLimiter:
                 if used + weight <= self.budget:
                     self.events.append((now, weight))
                     return
-                # Not enough budget yet -- sleep until the oldest event
-                # ages out of the window.
+                # not enough budget yet; wait for the oldest event to age out
                 sleep_for = max(0.05, self.events[0][0] + self.window_s - now)
             time.sleep(min(sleep_for, 2.0))
 
@@ -247,8 +211,7 @@ _rate_limiter = _WeightRateLimiter(HL_WEIGHT_BUDGET_PER_MINUTE)
 
 
 def _request_weight(payload: dict) -> float:
-    """Estimate the Hyperliquid weight cost of a request. See constants
-    block above for the assumptions behind the candleSnapshot scaling."""
+    """Estimate the Hyperliquid weight cost of a request."""
     req_type = payload.get("type", "")
     if req_type == "candleSnapshot":
         req = payload.get("req", {})
@@ -276,11 +239,7 @@ def hl_post(payload: dict, retries: int = 4, timeout: int = 12) -> dict | list |
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 retry_after = e.headers.get("Retry-After")
-                # Hyperliquid's docs note that once an address is rate
-                # limited, it's only allowed one request per 10s -- so
-                # the fallback floor here is 10s, not a short exp-backoff,
-                # since retrying faster than that will just 429 again.
-                wait_s = float(retry_after) if retry_after else 10.0
+                wait_s = float(retry_after) if retry_after else 10.0  # HL allows 1 req/10s once limited
                 log.warning("hl_post 429 (attempt %d, type=%s), backing off %.1fs",
                             attempt + 1, payload.get("type"), wait_s)
                 time.sleep(wait_s)
@@ -326,20 +285,10 @@ def _request_candles(symbol: str, interval: str, start_ms: int, end_ms: int) -> 
 
 def get_candles(symbol: str, interval: str, n: int, reference_ms: int | None = None,
                  cache_entry: list[dict] | None = None) -> list[dict]:
-    """Return the last `n` closed candles for symbol/interval.
-
-    If `cache_entry` (a list of previously cached candles, oldest-first) is
-    provided and already has bars, only fetch bars newer than the cached
-    watermark (minus a small overlap for safety) and merge, instead of
-    re-requesting the full window. Falls back to a full-window fetch when
-    there's no usable cache yet.
-
-    If not enough real time has passed for a new candle to have closed
-    since the last cached bar, skips the network call entirely and
-    returns the cached data as-is -- a 4h/1d timeframe re-fetched every
-    15 minutes would otherwise pay full API weight for a call that returns
-    no new bars almost every time.
-    """
+    """Return the last `n` closed candles for symbol/interval. Uses
+    `cache_entry` to fetch only new bars past the cached watermark when
+    possible, and skips the network call entirely if no new bar could
+    have closed yet."""
     reference_ms = reference_ms or int(time.time() * 1000)
 
     if cache_entry:
@@ -355,13 +304,11 @@ def get_candles(symbol: str, interval: str, n: int, reference_ms: int | None = N
                 merged[c["t"]] = c
             candles = [merged[t] for t in sorted(merged.keys())]
         else:
-            # Delta fetch failed/empty (e.g. transient error) - fall back to
-            # what we already had cached rather than losing history.
-            candles = cache_entry
+            candles = cache_entry  # delta fetch failed; fall back to cache
         candles = filter_closed_candles(candles, interval, reference_ms)
         return candles[-n:]
 
-    # No cache yet (first run, or this symbol/tf was never cached): full pull.
+    # no cache: full pull
     lookback_ms = n * TF_MS[interval] * 2 + TF_MS[interval] * 5
     raw = _request_candles(symbol, interval, reference_ms - lookback_ms, reference_ms)
     candles = filter_closed_candles(raw, interval, reference_ms)
@@ -437,9 +384,7 @@ def analyze_orderbook(coin: str) -> dict:
         return {"imbalance": 0.0, "spread_bps": None}
 
 
-# ============================================================================
-# INDICATORS
-# ============================================================================
+# --- INDICATORS ---
 
 def safe(v, fb=0.0):
     try:
@@ -548,12 +493,9 @@ def bollinger_width_pct(closes: list[float], period: int = BB_LEN, mult: float =
 def detect_rsi_divergence(closes: list[float], rsi_values: list[float],
                            highs: list[float], lows: list[float],
                            lookback: int = 20) -> dict:
-    """Classic price/RSI divergence over the last `lookback` bars: bearish
-    divergence is a higher price high paired with a lower RSI high (momentum
-    fading into a new high -- reversal-down warning/confirmation); bullish
-    is the mirror image on swing lows. Used as a confluence bonus, not a
-    hard filter, so it lifts quality on setups that already qualify without
-    ever being the sole reason a setup is rejected."""
+    """Price/RSI divergence over the last `lookback` bars: bearish is a
+    higher price high with a lower RSI high; bullish is the mirror on
+    swing lows. Used as a confluence bonus, never a hard filter."""
     min_len = lookback + 2
     if min(len(closes), len(rsi_values), len(highs), len(lows)) < min_len:
         return {"type": None, "strength": 0}
@@ -597,9 +539,7 @@ def compute_indicators(candles: list[dict]) -> dict:
     }
 
 
-# ============================================================================
-# STATE MANAGEMENT
-# ============================================================================
+# --- STATE MANAGEMENT ---
 
 def _default_state() -> dict:
     return {
@@ -614,7 +554,7 @@ def _default_state() -> dict:
         "symbol_weights": {},
         "corr_returns": {},
         "last_summary_ts": 0,
-        "meta": {"version": "2.2.0", "created": int(time.time())},
+        "meta": {"version": "2.2.2", "created": int(time.time())},
     }
 
 
@@ -673,9 +613,7 @@ def prune_state(state: dict, max_signals: int = 800, max_days: int = 21):
         state["atr_pct_memory"][sym] = state["atr_pct_memory"][sym][-200:]
 
 
-# ============================================================================
-# REGIME VECTOR
-# ============================================================================
+# --- REGIME VECTOR ---
 
 @dataclass
 class RegimeVector:
@@ -688,9 +626,7 @@ class RegimeVector:
     breadth: float   # 0..1, % of watchlist whose own 1h trend agrees with btc_bias
 
     def composite_favorability(self) -> float:
-        # Higher is more favorable for taking signals: clean trend, decent
-        # liquidity, not chaotic noise, and the rest of the market agreeing
-        # with BTC rather than BTC moving in isolation.
+        # higher = more favorable: clean trend, low noise, good breadth
         trend_component = min(self.adx_bias / 35.0, 1.0)
         noise_penalty = max(0.0, 1.0 - self.noise_index)
         return round(
@@ -701,10 +637,8 @@ class RegimeVector:
 
 
 def session_weight_now() -> float:
-    """Crypto trades 24/7 but liquidity still clusters around US/EU overlap
-    and Asia open. Weight scans slightly favorably during high-liquidity
-    hours (13:00-21:00 UTC) and slightly down during the quiet 00:00-05:00
-    UTC stretch, without hard-blocking any hour."""
+    """Weights scans up during high-liquidity hours (13:00-21:00 UTC) and
+    down during the quiet 00:00-05:00 UTC stretch."""
     hour = time.gmtime().tm_hour
     if 13 <= hour <= 21:
         return 1.0
@@ -739,9 +673,8 @@ def compute_btc_regime(btc_bundle: dict) -> tuple[str, float]:
 
 
 def compute_noise_index(candles: list[dict], lookback: int = 30) -> float:
-    """Ratio of net displacement to total path length over the lookback --
-    low values mean choppy/overlapping candles (noisy), high values mean
-    directional travel (clean)."""
+    """1 - (net displacement / path length) over the lookback: low means
+    clean directional travel, high means choppy/overlapping candles."""
     window = candles[-lookback:]
     if len(window) < 5:
         return 0.5
@@ -752,9 +685,8 @@ def compute_noise_index(candles: list[dict], lookback: int = 30) -> float:
 
 
 def symbol_bias_from_bundle(bundle: dict) -> str | None:
-    """Lightweight 1h EMA20/EMA50 bias read for the market-breadth gate,
-    reusing an already-fetched candle bundle instead of firing a dedicated
-    request per symbol."""
+    """1h EMA20/EMA50 bias read for the market-breadth gate, reusing the
+    already-fetched bundle."""
     candles = bundle.get("1h")
     if not candles or len(candles) < EMA_SLOW + 5:
         return None
@@ -764,10 +696,8 @@ def symbol_bias_from_bundle(bundle: dict) -> str | None:
 
 
 def compute_breadth(bundles: dict[str, dict], btc_bias: str) -> float:
-    """Cross-sectional market-breadth gate: the fraction of the watchlist
-    whose own 1h trend agrees with BTC's regime bias. A neutral BTC bias
-    (no clear stack alignment) makes "agreement" undefined, so this falls
-    back to a neutral 0.5 read in that case too."""
+    """Fraction of the watchlist whose 1h trend agrees with BTC's bias.
+    Falls back to a neutral 0.5 when BTC bias itself is neutral."""
     if btc_bias not in ("bullish", "bearish") or not bundles:
         return 0.5
     biases = [b for b in (symbol_bias_from_bundle(bundle) for bundle in bundles.values()) if b is not None]
@@ -791,10 +721,7 @@ def build_regime_vector(state: dict, symbol: str, bundle: dict, btc_bias: str,
 
 
 def select_combo(regime: RegimeVector) -> str:
-    """Route to the timeframe combo that fits current conditions: high
-    vol/high ADX favors faster scalp reads before the move exhausts; low
-    vol/low ADX favors the swing combo, which needs less frequent
-    confirmation and rides out chop on a higher timeframe."""
+    """High vol/high ADX -> scalp; low vol/low ADX -> swing; else intraday."""
     if regime.vol_pctile > 0.7 and regime.adx_bias > 25:
         return "scalp"
     if regime.vol_pctile < 0.3 and regime.adx_bias < 18:
@@ -803,26 +730,18 @@ def select_combo(regime: RegimeVector) -> str:
 
 
 def adaptive_thresholds(regime: RegimeVector, base_threshold: float, combo_name: str | None = None) -> float:
-    """Nudge the base (governor-controlled) threshold up in noisy/choppy
-    conditions and slightly down in clean, favorable ones -- bounded so the
-    governor still owns the long-run level."""
+    """Nudges the governor's base threshold up in choppy conditions and
+    down in clean ones, bounded within the governor's floor/ceiling."""
     fav = regime.composite_favorability()
     adj = (0.5 - fav) * 10.0  # favorable (fav>0.5) lowers bar, unfavorable raises it
-    # "intraday" is select_combo()'s default/catch-all: any regime that isn't
-    # clearly high-vol/high-ADX (-> scalp) or clearly low-vol/low-ADX (-> swing)
-    # falls here. state.json history shows this bucket is genuinely weaker
-    # (33% win rate, -0.28R average over 48 closed trades) than scalp (58% WR,
-    # +0.44R avg) -- consistent with "ambiguous regime" being lower-edge by
-    # nature, not a scoring artifact. Hold intraday candidates to a higher bar
-    # rather than pretending they deserve the same threshold as a clean regime.
+    # "intraday" is the ambiguous-regime catch-all and has weaker historical
+    # edge than scalp/swing, so hold it to a higher bar.
     if combo_name == "intraday":
         adj += 4.0
     return max(GOVERNOR_FLOOR, min(GOVERNOR_CEIL, base_threshold + adj))
 
 
-# ============================================================================
-# MARKET STRUCTURE: SWINGS, BOS/CHoCH, ORDER BLOCKS, FVGs, LIQUIDITY
-# ============================================================================
+# --- MARKET STRUCTURE: SWINGS, BOS/CHoCH, ORDER BLOCKS, FVGs, LIQUIDITY ---
 
 @dataclass
 class Swing:
@@ -993,9 +912,7 @@ def detect_mss(candles_exec: list[dict], direction: str, lookback: int = 30) -> 
     return None
 
 
-# ============================================================================
-# CANDIDATE SETUPS
-# ============================================================================
+# --- CANDIDATE SETUPS ---
 
 @dataclass
 class Candidate:
@@ -1018,14 +935,9 @@ class Candidate:
 
 def adaptive_sl_buffer(candles: list[dict], atr_val: float, vol_pctile: float,
                         lookback: int = 20) -> float:
-    """Sizes the stop buffer beyond invalidation structure from *observed*
-    recent wick behavior rather than a flat ATR fraction -- the idea a
-    discretionary trader applies when they say 'give it room for the wick.'
-    Looks at how far recent candles have actually overshot their own
-    bodies, floors the buffer at a sane ATR fraction, widens it further
-    when the symbol is currently in an elevated-volatility percentile (more
-    prone to stop-hunt wicks), and caps it so one abnormal spike can't blow
-    the risk budget out."""
+    """Sizes the stop buffer from observed recent wick overshoot rather
+    than a flat ATR fraction, widened in high-volatility regimes and
+    capped so one abnormal spike can't blow out the risk budget."""
     window = candles[-lookback:]
     if len(window) < 5:
         base = atr_val * 0.35
@@ -1041,12 +953,8 @@ def adaptive_sl_buffer(candles: list[dict], atr_val: float, vol_pctile: float,
 
 
 def clamp_candidate_to_market(cand: "Candidate", market_price: float) -> "Candidate":
-    """Keeps the entry from drifting too far from the live tradable price
-    (the complaint that a 'signal' with an entry 2% away isn't really
-    actionable). Rather than just rejecting far-entry setups outright, this
-    parallel-shifts entry/SL/TP1/TP2 by the same amount so the R:R and
-    structure relationships are preserved exactly -- only the anchor point
-    moves closer to where price actually is."""
+    """Keeps entry from drifting too far from live price by parallel-
+    shifting entry/SL/TP1/TP2, preserving R:R and structure exactly."""
     if market_price <= 0:
         return cand
     max_dist = min(cand.atr_val * POI_ATR_MULT.get(cand.combo_name, 0.65),
@@ -1064,12 +972,9 @@ def clamp_candidate_to_market(cand: "Candidate", market_price: float) -> "Candid
 
 
 def volume_profile(candles: list[dict], bins: int = VOL_PROFILE_BINS) -> dict:
-    """Session volume profile -> POC (point of control), value-area
-    high/low, and session VWAP. Buckets the (h+l+c)/3 typical price of each
-    bar by traded volume, takes the highest-volume bucket as the POC, then
-    expands outward bucket-by-bucket (toward whichever side has more
-    volume) until 70% of total volume is enclosed -- that span is the value
-    area."""
+    """Session volume profile -> POC, value-area high/low, and VWAP.
+    Buckets typical price by volume, takes the highest-volume bucket as
+    POC, then expands outward until 70% of volume is enclosed."""
     hi = max(c["h"] for c in candles)
     lo = min(c["l"] for c in candles)
     if hi <= lo:
@@ -1104,19 +1009,13 @@ def _clip_tp_to_liquidity(entry: float, tp: float, direction: str, pools: dict,
                            vp: dict | None = None) -> float:
     targets = pools["resistance"] if direction == "long" else pools["support"]
     candidates = [lv for lv, _ in targets if (lv > entry if direction == "long" else lv < entry)]
-    # Volume-profile value-area edges + POC: real volume-built levels the
-    # swing-only pools above can miss when the market built out
-    # participation somewhere price never wicked to.
-    if vp:
+    if vp:  # volume-profile value-area edges + POC
         candidates += [lv for lv in (vp["poc"], vp["vah"], vp["val"])
                        if (lv > entry if direction == "long" else lv < entry)]
     if not candidates:
         return tp
     nearest = min(candidates, key=lambda lv: abs(lv - tp))
-    # Only clip if the liquidity target is reasonably close to the raw TP
-    # (within 40%) -- otherwise the raw ATR/structure target stands, since a
-    # far-off pool shouldn't truncate a legitimately larger move.
-    if abs(nearest - tp) / abs(tp - entry) < 0.4:
+    if abs(nearest - tp) / abs(tp - entry) < 0.4:  # only clip if reasonably close
         return nearest
     return tp
 
@@ -1134,7 +1033,7 @@ def build_pathway_liquidity_reversal(symbol: str, bundle: dict, combo_name: str,
     pd_zone = premium_discount_zone(struct_candles)
 
     for direction in ("long", "short"):
-        # Bias filter: reversal longs want discount, reversal shorts want premium.
+        # reversal longs want discount, reversal shorts want premium
         if direction == "long" and pd_zone["zone"] != "discount":
             continue
         if direction == "short" and pd_zone["zone"] != "premium":
@@ -1207,9 +1106,7 @@ def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
 
     price = ind_bias["closes"][-1]
     ef, es, et = ind_bias["ema_fast"][-1], ind_bias["ema_slow"][-1], ind_bias["ema_trend"][-1]
-    # Require the full EMA20/50/200 stack aligned (same test used for BTC
-    # regime), not just EMA20 vs EMA50. A 20/50 cross alone fires plenty on
-    # medium-term counter-trend bounces that aren't real continuation.
+    # require full EMA20/50/200 stack aligned, not just a 20/50 cross
     if price > ef > es > et:
         direction = "long"
     elif price < ef < es < et:
@@ -1313,9 +1210,7 @@ def build_pathway_momentum_breakout(symbol: str, bundle: dict, combo_name: str,
     opposing = (direction == "long" and div["type"] == "bearish") or \
                (direction == "short" and div["type"] == "bullish")
     if opposing:
-        # A breakout against fading momentum is exactly the profile of a
-        # failed breakout/trap -- don't hard-block it (breakouts can still
-        # work on pure volume), but flag it so the score reflects the risk.
+        # flag rather than block -- breakouts can still work on pure volume
         confluences.append(f"caution: opposing RSI {div['type']} divergence")
     elif (direction == "long" and div["type"] == "bullish") or \
          (direction == "short" and div["type"] == "bearish"):
@@ -1335,9 +1230,7 @@ PATHWAYS = [
 ]
 
 
-# ============================================================================
-# SCORING
-# ============================================================================
+# --- SCORING ---
 
 def logistic(x: float) -> float:
     try:
@@ -1372,24 +1265,16 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
     else:
         z -= 0.6 * imbalance
 
-    # Session VWAP alignment: being on the "right side" of session VWAP for
-    # the trade direction is a session-level confluence the swing/structure
-    # checks above don't capture on their own. Asymmetric -- aligned is
-    # rewarded more than misaligned is punished, since VWAP position is a
-    # soft confluence rather than a hard invalidation signal.
+    # session VWAP alignment; asymmetric since it's a soft confluence
     if vp:
         vwap_aligned = (cand.entry >= vp["vwap"]) if cand.direction == "long" else (cand.entry <= vp["vwap"])
         z += 0.4 if vwap_aligned else -0.25
 
-    # Regularized self-tuning pathway weight: tune_pathway_weights() drifts
-    # this slowly toward the pathway's recent win-rate, shrunk toward the
-    # neutral prior of 1.0. A pathway with no edge yet contributes zero shift.
+    # self-tuning pathway/symbol weights, drifted by tune_pathway_weights()
+    # and tune_symbol_weights() toward recent win-rate, shrunk toward 1.0
     pathway_weight = state["pathway_weights"].get(cand.pathway, 1.0)
     z += 2.8 * (pathway_weight - 1.0)
 
-    # Same idea, per-symbol: a symbol on a genuine cold streak (thin book,
-    # a level that keeps getting swept, chronic slippage) gets penalized
-    # independent of which pathway flagged it.
     symbol_weight = state.get("symbol_weights", {}).get(cand.symbol, 1.0)
     z += 2.2 * (symbol_weight - 1.0)
 
@@ -1402,15 +1287,9 @@ SYMBOL_WEIGHT_LEARNING_RATE = 0.05
 SYMBOL_MIN_SAMPLE = 5
 
 def tune_symbol_weights(state: dict):
-    """Same shrink-toward-neutral self-tuning as tune_pathway_weights(), but
-    per-symbol. state.json history showed a handful of symbols (APT, ZEC,
-    BCH, AAVE) posting sharply negative expectancy over their last 5-10
-    closed trades while carrying full confidence weight identical to
-    consistently profitable symbols (PENDLE, UNI, DOT). This lets the
-    scorer down-weight a symbol's own recent track record instead of only
-    reacting at the pathway level, which is too coarse to catch
-    symbol-specific edge decay (e.g. thin order books, chronic slippage,
-    a level that keeps getting swept)."""
+    """Same shrink-toward-neutral self-tuning as tune_pathway_weights(),
+    but per-symbol, to catch symbol-specific edge decay that pathway-level
+    weighting alone is too coarse for."""
     weights = state.setdefault("symbol_weights", {})
     history = state["signal_history"]
     by_symbol: dict[str, list[dict]] = {}
@@ -1423,9 +1302,8 @@ def tune_symbol_weights(state: dict):
         recent = trades[-20:]
         wr = sum(1 for h in recent if h["result"] in ("win", "breakeven")) / len(recent)
         avg_r = sum(h.get("r_realized", 0) for h in recent) / len(recent)
-        # Blend win-rate and realized R so a high win-rate/low-R symbol
-        # (small wins, occasional large losses -- see momentum_breakout)
-        # doesn't get treated the same as genuine edge.
+        # blend win-rate and realized R so small-wins/big-losses symbols
+        # aren't scored the same as genuine edge
         target = 0.85 + 0.4 * wr + 0.15 * max(-1.0, min(1.0, avg_r))
         target = max(SYMBOL_WEIGHT_MIN, min(SYMBOL_WEIGHT_MAX, target))
         current = weights.get(symbol, 1.0)
@@ -1435,11 +1313,8 @@ def tune_symbol_weights(state: dict):
 
 def tune_pathway_weights(state: dict):
     """Nudges each pathway's scoring multiplier toward its recent win-rate,
-    shrunk toward the neutral prior (1.0) so a short streak can't push the
-    engine into an overfit corner. Bounds are tight
-    (PATHWAY_WEIGHT_MIN..MAX) and the step size is small, so weights drift
-    slowly instead of snapping to whatever the last few outcomes happened
-    to be."""
+    shrunk toward the neutral prior (1.0) with tight bounds and a small
+    step size so it drifts slowly rather than snapping to noise."""
     weights = state.setdefault("pathway_weights", {
         "liquidity_reversal": 1.0, "trend_continuation": 1.0, "momentum_breakout": 1.0,
     })
@@ -1470,9 +1345,7 @@ def classify_duration(combo_name: str) -> str:
     return COMBOS[combo_name]["hold_hint"]
 
 
-# ============================================================================
-# CORRELATION CLUSTERING & DEDUPLICATION
-# ============================================================================
+# --- CORRELATION CLUSTERING & DEDUPLICATION ---
 
 def compute_returns(candles: list[dict], lookback: int) -> list[float]:
     closes = [c["c"] for c in candles[-lookback - 1:]]
@@ -1520,13 +1393,8 @@ def build_correlation_clusters(bundles: dict[str, dict]) -> list[set[str]]:
 
 def dedup_correlated(ranked: list[dict], clusters: list[set[str]]) -> list[dict]:
     """Keeps at most one candidate per correlated cluster, regardless of
-    direction. Keying on (cluster, direction) instead of cluster alone was
-    a known bug carried over from Kestrel/Helios: it let two symbols in the
-    same >=0.72-correlated cluster fire in OPPOSITE directions, since each
-    direction got its own dedup slot. That's not diversification -- it's
-    the engine betting against itself on the same underlying move. Keying
-    on cluster alone means only the single highest-confidence candidate in
-    a correlated cluster survives, no matter which direction it's in."""
+    direction, so two correlated symbols can't fire in opposite directions
+    (the engine betting against itself on the same underlying move)."""
     def cluster_of(sym: str) -> frozenset:
         for c in clusters:
             if sym in c:
@@ -1543,11 +1411,9 @@ def dedup_correlated(ranked: list[dict], clusters: list[set[str]]) -> list[dict]
 
 def conflicts_with_open_positions(state: dict, symbol: str, direction: str,
                                    clusters: list[set[str]]) -> bool:
-    """The same cluster-direction bug also existed one level up: dedup_correlated
-    only ever compared candidates that fired in the SAME scan. A new candidate
-    correlated with an already-OPEN position from a prior scan, in the
-    opposite direction, was never checked at all. This closes that gap by
-    checking new candidates against currently active_signals too."""
+    """Blocks a new candidate correlated with an already-open position in
+    the opposite direction (dedup_correlated only compares same-scan
+    candidates, so cross-scan conflicts need this separate check)."""
     def cluster_of(sym: str) -> frozenset:
         for c in clusters:
             if sym in c:
@@ -1563,9 +1429,7 @@ def conflicts_with_open_positions(state: dict, symbol: str, direction: str,
     return False
 
 
-# ============================================================================
-# HARD FILTERS, COOLDOWN, GOVERNOR
-# ============================================================================
+# --- HARD FILTERS, COOLDOWN, GOVERNOR ---
 
 def passes_hard_filters(symbol: str, snapshot: dict, atr_pct: float, cand: Candidate) -> tuple[bool, str]:
     info = snapshot.get(symbol)
@@ -1626,30 +1490,18 @@ def estimate_signals_last_24h(state: dict) -> int:
     return sum(1 for h in state["signal_history"] if h.get("ts", 0) >= cutoff)
 
 
-# ============================================================================
-# TELEGRAM
-# ============================================================================
+# --- TELEGRAM ---
 
 _TG_MD_SPECIAL = re.compile(r"([_*`\[])")
 
 
 def tg_escape(value) -> str:
-    """Escape characters that carry special meaning in Telegram's legacy
-    `parse_mode: "Markdown"` (V1): `_` `*` `` ` `` `[`.
-
-    Apply this to any data-derived string (symbol names, pathway/enum
-    values, free-text confluence notes, etc.) before it's dropped into a
-    message as *plain* text. A single unmatched `_` or `*` makes Telegram's
-    entity parser fail with "Can't parse entities" and the whole send gets
-    rejected with HTTP 400 -- that's what happened when an odd number of
-    underscore-containing pathway names landed in the daily summary.
-
-    Don't use this on text that's deliberately being wrapped as an entity
-    itself (e.g. the `*bold*` / `` `code` `` markers we add on purpose) --
-    escape the *contents*, not the markers, and prefer wrapping in `` `code` ``
-    over escaping when the value should render as monospace anyway (that's
-    what fmt_px()'d numbers and the pathway name already do).
-    """
+    """Escape `_` `*` `` ` `` `[`, which carry special meaning in
+    Telegram's legacy Markdown (V1) parse mode. Apply to any data-derived
+    string before it's dropped into a message as plain text -- an
+    unmatched `_` or `*` makes the whole send fail with HTTP 400. Don't
+    use on text deliberately wrapped as an entity (e.g. `*bold*`); escape
+    the contents, not the markers."""
     return _TG_MD_SPECIAL.sub(r"\\\1", str(value))
 
 
@@ -1670,7 +1522,7 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.2.0* -- {tg_escape(cand.symbol)}/USD",
+        f"*AXIS ENGINE v2.2.2* -- {tg_escape(cand.symbol)}/USD",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -1705,9 +1557,8 @@ def send_telegram(text: str) -> int | None:
 
 
 def reply_telegram(text: str, reply_to_message_id: int | None) -> int | None:
-    """Sends a message threaded as a reply to the original signal post (if
-    we have its message_id), so TP/SL/close-out updates show up attached to
-    the trade they belong to instead of as standalone messages."""
+    """Sends a message as a threaded reply to the original signal post so
+    TP/SL/close-out updates stay attached to their trade."""
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         log.info("Telegram not configured; update:\n%s", text)
         return None
@@ -1727,9 +1578,8 @@ def reply_telegram(text: str, reply_to_message_id: int | None) -> int | None:
 
 
 def react_telegram(message_id: int | None, emoji: str) -> None:
-    """Best-effort emoji reaction on the original signal message. Uses only
-    emoji from Telegram's allowed reaction set. Failures are logged and
-    swallowed -- a missing reaction should never break signal tracking."""
+    """Best-effort emoji reaction on the original signal message; failures
+    are logged and swallowed."""
     if not TG_BOT_TOKEN or not TG_CHAT_ID or not message_id:
         return
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/setMessageReaction"
@@ -1745,12 +1595,11 @@ def react_telegram(message_id: int | None, emoji: str) -> None:
         log.debug("Telegram reaction failed (non-fatal): %s", e)
 
 
-# ============================================================================
-# ACTIVE SIGNAL TRACKING / OUTCOME RESOLUTION
-# ============================================================================
+# --- ACTIVE SIGNAL TRACKING / OUTCOME RESOLUTION ---
 
 def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
                    bar_index: int, message_id: int | None) -> dict:
+    now_ms = int(time.time() * 1000)
     entry = {
         "symbol": cand.symbol, "direction": cand.direction, "pathway": cand.pathway,
         "combo": cand.combo_name, "entry": cand.entry, "sl": cand.sl,
@@ -1758,6 +1607,7 @@ def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
         "confidence": confidence, "grade": grade, "ts": int(time.time()),
         "bar_index": bar_index, "result": "open", "tp1_hit": False,
         "message_id": message_id,
+        "last_checked_ms": now_ms,  # watermark for intrabar SL/TP monitoring
     }
     state["active_signals"].append(entry)
     state["signal_history"].append(dict(entry))
@@ -1816,34 +1666,105 @@ def _close_out(state: dict, sig: dict, result: str, price: float):
               sig["symbol"], sig["direction"], sig["pathway"], result, r)
 
 
-def check_active_signals(state: dict, snapshot: dict):
-    still_active = []
-    for sig in state["active_signals"]:
-        info = snapshot.get(sig["symbol"])
-        if not info or not info.get("mark"):
-            still_active.append(sig)
-            continue
-        price = info["mark"]
-        direction = sig["direction"]
+def _closed_15m_candles_for(symbol: str, bundles: dict, candle_cache: dict) -> list[dict]:
+    """15m candles already fetched this scan as part of the symbol's
+    bundle; falls back to the on-disk cache if this cycle's fetch failed."""
+    bundle = bundles.get(symbol)
+    if bundle and bundle.get("15m"):
+        return bundle["15m"]
+    cached = (candle_cache or {}).get(symbol, {}).get("15m")
+    return cached or []
 
+
+def _level_hit(candle: dict, level: float, direction: str, side: str) -> bool:
+    """side='sl' tests the adverse extreme of the bar; side='tp' tests the
+    favorable extreme. Tests the wick, not just close/mark."""
+    if side == "sl":
+        return candle["l"] <= level if direction == "long" else candle["h"] >= level
+    return candle["h"] >= level if direction == "long" else candle["l"] <= level
+
+
+def _check_signal_against_candle(state: dict, sig: dict, candle: dict) -> bool:
+    """Tests one signal against one closed candle's high/low, checked in
+    SL -> TP2 -> TP1 order (worst case first when a bar spans levels)."""
+    direction = sig["direction"]
+    if _level_hit(candle, sig["sl"], direction, "sl"):
+        _close_out(state, sig, "breakeven" if sig.get("tp1_hit") else "loss", sig["sl"])
+        return True
+    if _level_hit(candle, sig["tp2"], direction, "tp"):
+        _close_out(state, sig, "win", sig["tp2"])
+        return True
+    if not sig.get("tp1_hit") and _level_hit(candle, sig["tp1"], direction, "tp"):
+        sig["tp1_hit"] = True
+        sig["sl"] = sig["entry"]  # lock in breakeven once TP1 is banked
+        _notify_tp1(sig, sig["tp1"])
+        _sync_history(state, sig)
+    return False
+
+
+def _check_active_signals_by_mark(state: dict, sigs: list[dict], snapshot: dict, symbol: str) -> list[dict]:
+    """Fallback for when no 15m candles are available at all (bundle fetch
+    failed and nothing cached). Checks against live mark price; leaves
+    last_checked_ms untouched so the gap backfills once candles return."""
+    info = snapshot.get(symbol)
+    if not info or not info.get("mark"):
+        return list(sigs)
+    price = info["mark"]
+    remaining = []
+    for sig in sigs:
+        direction = sig["direction"]
         hit_sl = (price <= sig["sl"]) if direction == "long" else (price >= sig["sl"])
         hit_tp2 = (price >= sig["tp2"]) if direction == "long" else (price <= sig["tp2"])
         hit_tp1 = (not sig.get("tp1_hit")) and (
             (price >= sig["tp1"]) if direction == "long" else (price <= sig["tp1"])
         )
-
         if hit_sl:
             _close_out(state, sig, "breakeven" if sig.get("tp1_hit") else "loss", price)
-            continue
-        if hit_tp2:
+        elif hit_tp2:
             _close_out(state, sig, "win", price)
+        else:
+            if hit_tp1:
+                sig["tp1_hit"] = True
+                sig["sl"] = sig["entry"]
+                _notify_tp1(sig, price)
+                _sync_history(state, sig)
+            remaining.append(sig)
+    return remaining
+
+
+def check_active_signals(state: dict, snapshot: dict, bundles: dict, candle_cache: dict):
+    """Monitors every open signal against closed 15m candle highs/lows
+    since it was last checked, using candles already fetched this scan."""
+    now_ms = int(time.time() * 1000)
+    by_symbol: dict[str, list[dict]] = {}
+    for sig in state["active_signals"]:
+        by_symbol.setdefault(sig["symbol"], []).append(sig)
+    if not by_symbol:
+        return
+
+    still_active = []
+    for symbol, sigs in by_symbol.items():
+        candles = _closed_15m_candles_for(symbol, bundles, candle_cache)
+        if not candles:
+            still_active.extend(_check_active_signals_by_mark(state, sigs, snapshot, symbol))
             continue
-        if hit_tp1:
-            sig["tp1_hit"] = True
-            sig["sl"] = sig["entry"]  # lock in breakeven once TP1 is banked
-            _notify_tp1(sig, price)
-            _sync_history(state, sig)
-        still_active.append(sig)
+
+        open_sigs = list(sigs)
+        closed_ids = set()
+        for sig in open_sigs:
+            watermark = sig.get("last_checked_ms") or (int(sig.get("ts", 0)) * 1000)
+            new_bars = [c for c in candles if c["t"] >= watermark]  # only bars closed since last check
+            for candle in new_bars:
+                if _check_signal_against_candle(state, sig, candle):
+                    closed_ids.add(id(sig))
+                    break
+            if id(sig) not in closed_ids:
+                sig["last_checked_ms"] = now_ms
+
+        for sig in open_sigs:
+            if id(sig) not in closed_ids:
+                still_active.append(sig)
+
     state["active_signals"] = still_active
 
 
@@ -1895,16 +1816,13 @@ def maybe_send_daily_summary(state: dict):
     state["last_summary_ts"] = int(time.time())
 
 
-# ============================================================================
-# MAIN EVALUATION / SCAN
-# ============================================================================
+# --- MAIN EVALUATION / SCAN ---
 
 def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_strength: float,
                      breadth: float, snapshot: dict, threshold: float) -> Optional[dict]:
-    """Pure evaluation: reads state (cooldowns, win-rate priors) but never
-    writes it. All state mutation (cooldown update, signal recording,
-    Telegram send) happens centrally in run_scan after this returns, so the
-    per-symbol fetch+scoring work here is safe to run concurrently."""
+    """Pure evaluation: reads state but never writes it, so per-symbol
+    fetch+scoring is safe to run concurrently. State mutation happens
+    centrally in run_scan after this returns."""
     regime = build_regime_vector(state, symbol, bundle, btc_bias, btc_strength, breadth, COMBOS["intraday"])
     combo_name = select_combo(regime)
     local_threshold = adaptive_thresholds(regime, threshold, combo_name)
@@ -1914,11 +1832,7 @@ def evaluate_symbol(symbol: str, bundle: dict, state: dict, btc_bias: str, btc_s
     market_price = snapshot.get(symbol, {}).get("mark") or bundle[combo["exec"]][-1]["c"]
     vp = volume_profile(bundle["1h"][-VOL_PROFILE_LOOKBACK_BARS:])
 
-    # analyze_orderbook is an l2Book network call. Most symbols never get
-    # this far (they're filtered out by cooldown/dedup/hard filters first),
-    # so we fetch the book lazily - only once a candidate actually clears
-    # those checks - and cache the result for the rest of this symbol's
-    # pathway loop so we never call it more than once per scan per symbol.
+    # fetched lazily since most symbols get filtered out before needing it
     book: dict | None = None
 
     best: Optional[tuple[Candidate, float, str]] = None
@@ -1960,19 +1874,16 @@ def count_open_for_symbol(state: dict, symbol: str) -> int:
 
 
 def _prefetch(symbol: str, candle_cache: dict[str, dict]) -> tuple[str, dict | None]:
-    # Each thread only ever reads/writes candle_cache[symbol], and symbols
-    # are unique per future, so concurrent dict access here is safe without
-    # a lock (no two threads touch the same top-level key).
+    # safe without a lock: each thread only touches its own symbol's key
     return symbol, fetch_all_candles(symbol, candle_cache)
 
 
 def run_scan():
-    log.info("=== AXIS ENGINE v2.2.0 scan starting ===")
+    log.info("=== AXIS ENGINE v2.2.2 scan starting ===")
     t_start = time.monotonic()
     state = load_state()
     candle_cache = load_candle_cache()
     snapshot = get_market_snapshot()
-    check_active_signals(state, snapshot)
 
     symbols_to_fetch = ["BTC"] + [s for s in WATCHLIST if s != "BTC"]
     bundles: dict[str, dict] = {}
@@ -1987,6 +1898,9 @@ def run_scan():
     save_candle_cache(candle_cache)
     log.info("Prefetched %d/%d symbol bundles in %.1fs",
               len(bundles), len(symbols_to_fetch), time.monotonic() - t_start)
+
+    # reuses the 15m candles already fetched above; no extra request needed
+    check_active_signals(state, snapshot, bundles, candle_cache)
 
     btc_bundle = bundles.get("BTC")
     if not btc_bundle:
@@ -2017,11 +1931,8 @@ def run_scan():
         if result:
             fired.append(result)
 
-    # Correlation dedup pass across everything that qualified this scan,
-    # reusing the already-fetched bundles instead of re-hitting the API.
-    # Clusters are built from the full watchlist bundle set (not just symbols
-    # that fired) so that currently-open positions -- which may not have
-    # fired this scan -- are still covered by the cross-scan check below.
+    # clusters cover the full watchlist bundle set so open positions that
+    # didn't fire this scan are still covered by the cross-scan check below
     clusters = build_correlation_clusters(bundles) if bundles else []
     if len(fired) > 1:
         ranked = [{"symbol": r["cand"].symbol, "direction": r["cand"].direction,
@@ -2030,10 +1941,8 @@ def run_scan():
         kept_ids = {id(k["ref"]) for k in kept}
         fired = [r for r in fired if id(r) in kept_ids]
 
-    # Cross-scan correlation check: block a new candidate that's correlated
-    # with an already-OPEN position in the opposite direction. dedup_correlated
-    # above only ever compared candidates from the same scan; a position opened
-    # three scans ago was invisible to it.
+    # blocks candidates correlated with an already-open position from a
+    # prior scan; dedup_correlated above only compares same-scan candidates
     still_fired = []
     for r in fired:
         if conflicts_with_open_positions(state, r["cand"].symbol, r["cand"].direction, clusters):
@@ -2066,18 +1975,11 @@ def run_scan():
 
 
 def _acquire_run_lock():
-    """Prevents two overlapping invocations of this script from running the
-    scan concurrently. The per-symbol dedup logic in run_scan (see
-    count_open_for_symbol / conflicts_with_open_positions) only ever reads
-    the state.json snapshot loaded at the START of THIS process's run - it
-    has no visibility into a second process that started before this one
-    finished and hasn't saved yet. If the external scheduler fires again
-    while a previous scan is still fetching candles / waiting out the HL
-    rate limiter (a slow run can exceed the 15-minute cadence), both
-    processes can see "no active signal" for the same symbol and each fire
-    one, independently - possibly in opposite directions - since neither
-    has seen the other's not-yet-saved result. A non-blocking flock makes
-    the second process exit immediately instead of racing the first."""
+    """Prevents two overlapping invocations from scanning concurrently: if
+    the scheduler fires again before a slow prior run has saved state,
+    both processes could see "no active signal" for the same symbol and
+    each fire one, possibly in opposite directions. A non-blocking flock
+    makes the second process exit immediately instead of racing the first."""
     lock_file = open(LOCK_PATH, "w")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
