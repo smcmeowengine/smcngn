@@ -84,6 +84,12 @@ CANDLE_COUNT = {"5m": 300, "15m": 300, "1h": 300, "4h": 240, "1d": 180}
 # reverses between scans is still caught. 15m matches the scan cadence.
 MONITOR_TF = "15m"
 
+# Resting/POI entries (e.g. liquidity_reversal's breaker-block entry) sit
+# away from market price and may never actually trade. If price hasn't
+# reached the entry within this many closed MONITOR_TF candles, the signal
+# is cancelled as "expired" instead of sitting open forever. 8 * 15m = 2h.
+PENDING_ENTRY_EXPIRY_BARS = 8
+
 ATR_LEN = 14
 RSI_LEN = 14
 ADX_LEN = 14
@@ -926,6 +932,10 @@ class Candidate:
     tp2: float
     confluences: list[str] = field(default_factory=list)
     atr_val: float = 0.0
+    # True when `entry` is a resting POI/zone price that price may not yet
+    # have reached (e.g. a breaker-block mid), as opposed to a market-price
+    # entry (last close) that's filled the instant the signal fires.
+    resting_entry: bool = False
 
     def rr(self) -> float:
         risk = abs(self.entry - self.sl)
@@ -1076,7 +1086,8 @@ def build_pathway_liquidity_reversal(symbol: str, bundle: dict, combo_name: str,
             confluences.append(f"RSI {div['type']} divergence ({combo['struct']})")
 
         cand = Candidate(symbol, direction, "liquidity_reversal", combo_name,
-                          entry, sl, tp1, tp2, confluences, atr_val)
+                          entry, sl, tp1, tp2, confluences, atr_val,
+                          resting_entry=(breaker is not None))
         if cand.rr() >= MIN_RR:
             return cand
     return None
@@ -1608,6 +1619,12 @@ def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
         "bar_index": bar_index, "result": "open", "tp1_hit": False,
         "message_id": message_id,
         "last_checked_ms": now_ms,  # watermark for intrabar SL/TP monitoring
+        # Market-price entries (trend_continuation, momentum_breakout, and
+        # liquidity_reversal's no-breaker fallback) are filled the instant
+        # the signal fires. Resting POI/zone entries start unfilled and
+        # must be confirmed to trade before SL/TP can be evaluated.
+        "entry_filled": not cand.resting_entry,
+        "bars_pending": 0,
     }
     state["active_signals"].append(entry)
     state["signal_history"].append(dict(entry))
@@ -1652,7 +1669,10 @@ def _close_out(state: dict, sig: dict, result: str, price: float,
     sig["closed_ts"] = int(time.time())
     _sync_history(state, sig)
 
-    if result == "win" and exit_note == "tp1":
+    if result == "expired":
+        headline = "\u23F3 *Entry never filled -- signal expired*"
+        emoji = "\U0001F937"
+    elif result == "win" and exit_note == "tp1":
         headline = "\u2705 *TP1 secured -- WIN*"
         emoji = "\U0001F44D"
     elif result == "win":
@@ -1665,7 +1685,11 @@ def _close_out(state: dict, sig: dict, result: str, price: float,
         headline = "\u274C *SL hit -- LOSS*"
         emoji = "\U0001F44E"
 
-    if exit_note == "tp1":
+    if result == "expired":
+        text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
+                f"Price never traded through entry (`{fmt_px(sig['entry'])}`) within "
+                f"{PENDING_ENTRY_EXPIRY_BARS} {MONITOR_TF} bars -- cancelled, no result.")
+    elif exit_note == "tp1":
         text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
                 f"SL hit at `{fmt_px(price)}` after TP1 was already banked -- Result: {r:+.2f}R")
     else:
@@ -1695,10 +1719,35 @@ def _level_hit(candle: dict, level: float, direction: str, side: str) -> bool:
     return candle["h"] >= level if direction == "long" else candle["l"] <= level
 
 
+def _entry_hit(candle: dict, entry: float) -> bool:
+    """True if this candle's [low, high] range traded through `entry`,
+    regardless of direction -- that's the only thing that matters for a
+    resting order to fill."""
+    return candle["l"] <= entry <= candle["h"]
+
+
 def _check_signal_against_candle(state: dict, sig: dict, candle: dict) -> bool:
     """Tests one signal against one closed candle's high/low, checked in
-    SL -> TP2 -> TP1 order (worst case first when a bar spans levels)."""
+    SL -> TP2 -> TP1 order (worst case first when a bar spans levels).
+
+    Resting/POI entries (sig["entry_filled"] starts False) must first be
+    confirmed to actually trade before SL/TP are evaluated against them --
+    otherwise a zone entry price never reaches could be recorded as a win
+    or loss it never actually took. Market-price entries start with
+    entry_filled already True and skip straight to SL/TP checks below."""
     direction = sig["direction"]
+
+    if not sig.get("entry_filled"):
+        if not _entry_hit(candle, sig["entry"]):
+            sig["bars_pending"] = sig.get("bars_pending", 0) + 1
+            if sig["bars_pending"] >= PENDING_ENTRY_EXPIRY_BARS:
+                _close_out(state, sig, "expired", sig["entry"], r_override=0.0)
+                return True
+            return False
+        # Entry traded this candle: flip filled and fall through so this
+        # same candle can still register a same-candle SL/TP hit.
+        sig["entry_filled"] = True
+
     if _level_hit(candle, sig["sl"], direction, "sl"):
         if sig.get("tp1_hit"):
             _close_out(state, sig, "win", sig["sl"], r_override=sig.get("tp1_r"), exit_note="tp1")
@@ -1730,6 +1779,21 @@ def _check_active_signals_by_mark(state: dict, sigs: list[dict], snapshot: dict,
     remaining = []
     for sig in sigs:
         direction = sig["direction"]
+
+        if not sig.get("entry_filled"):
+            # Point-sample approximation of _entry_hit: since sl always sits
+            # farther from market than entry for these setups, "reached
+            # entry" means price has moved to at-or-past it on the sl side.
+            reached_entry = (price <= sig["entry"]) if direction == "long" else (price >= sig["entry"])
+            if not reached_entry:
+                sig["bars_pending"] = sig.get("bars_pending", 0) + 1
+                if sig["bars_pending"] >= PENDING_ENTRY_EXPIRY_BARS:
+                    _close_out(state, sig, "expired", sig["entry"], r_override=0.0)
+                    continue
+                remaining.append(sig)
+                continue
+            sig["entry_filled"] = True
+
         hit_sl = (price <= sig["sl"]) if direction == "long" else (price >= sig["sl"])
         hit_tp2 = (price >= sig["tp2"]) if direction == "long" else (price <= sig["tp2"])
         hit_tp1 = (not sig.get("tp1_hit")) and (
@@ -1798,6 +1862,9 @@ def generate_daily_summary(state: dict) -> str:
     breakevens = [h for h in resolved if h["result"] == "breakeven"]
     losses = [h for h in resolved if h["result"] == "loss"]
     open_now = [h for h in recent if h.get("result") == "open"]
+    expired = [h for h in recent if h.get("result") == "expired"]
+    # win-rate/R stats intentionally exclude "expired" (never filled, so no
+    # trade was ever actually taken) -- only win/loss/breakeven count here.
     total_r = sum(h.get("r_realized", 0.0) for h in resolved)
     win_rate = (len(wins) / len(resolved) * 100) if resolved else 0.0
 
@@ -1807,6 +1874,7 @@ def generate_daily_summary(state: dict) -> str:
         f"Signals fired: {len(recent)}",
         f"Resolved: {len(resolved)}  (\u2705 {len(wins)} incl. \u2696\ufe0f {len(breakevens)} BE  |  \u274C {len(losses)})",
         f"Still open: {len(open_now)}",
+        f"Expired (never filled): {len(expired)}",
         f"Win rate: {win_rate:.1f}%",
         f"Net R: {total_r:+.2f}",
     ]
