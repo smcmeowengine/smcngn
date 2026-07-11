@@ -43,6 +43,7 @@ Configure via environment variables (see CONFIGURATION below) and run:
 from __future__ import annotations
 
 import collections
+import fcntl
 import json
 import math
 import os
@@ -67,6 +68,7 @@ TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
 STATE_PATH = os.environ.get("AXIS_STATE_PATH", "state.json")
+LOCK_PATH = os.environ.get("AXIS_LOCK_PATH", "axis_engine.lock")
 LOG_PATH = os.environ.get("AXIS_LOG_PATH", "axis_engine.log")
 CANDLE_CACHE_PATH = os.environ.get("AXIS_CANDLE_CACHE_PATH", "candle_cache.json")
 # Extra closed bars re-requested past the cached watermark on every delta
@@ -2062,12 +2064,52 @@ def run_scan():
               sent, state["governor"]["threshold"], time.monotonic() - t_start)
 
 
+def _acquire_run_lock():
+    """Prevents two overlapping invocations of this script from running the
+    scan concurrently. The per-symbol dedup logic in run_scan (see
+    count_open_for_symbol / conflicts_with_open_positions) only ever reads
+    the state.json snapshot loaded at the START of THIS process's run - it
+    has no visibility into a second process that started before this one
+    finished and hasn't saved yet. If the external scheduler fires again
+    while a previous scan is still fetching candles / waiting out the HL
+    rate limiter (a slow run can exceed the 15-minute cadence), both
+    processes can see "no active signal" for the same symbol and each fire
+    one, independently - possibly in opposite directions - since neither
+    has seen the other's not-yet-saved result. A non-blocking flock makes
+    the second process exit immediately instead of racing the first."""
+    lock_file = open(LOCK_PATH, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.warning("Another scan is already running (lock held on %s); skipping this run.", LOCK_PATH)
+        lock_file.close()
+        return None
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file  # caller must keep this open for the life of the process
+
+
+def _release_run_lock(lock_file):
+    if lock_file is None:
+        return
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    lock_file.close()
+
+
 def main():
+    lock_file = _acquire_run_lock()
+    if lock_file is None:
+        return
     try:
         run_scan()
     except Exception as e:
         log.exception("Fatal error during scan: %s", e)
         raise SystemExit(1)
+    finally:
+        _release_run_lock(lock_file)
 
 
 if __name__ == "__main__":
