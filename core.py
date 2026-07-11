@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIS ENGINE v2.1.0
+AXIS ENGINE v2.2.0
 ==================
 Institutional-grade multi-timeframe SMC/ICT crypto perpetual signal engine
 for Hyperliquid.
@@ -37,7 +37,7 @@ the script; there is no long-running process and no database.
 
 Configure via environment variables (see CONFIGURATION below) and run:
 
-    python3 axis_engine_v2_1_0.py
+    python3 axis_engine_v2_2_0.py
 """
 
 from __future__ import annotations
@@ -1670,7 +1670,7 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.1.0* -- {tg_escape(cand.symbol)}/USD",
+        f"*AXIS ENGINE v2.2.0* -- {tg_escape(cand.symbol)}/USD",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -1966,7 +1966,7 @@ def _prefetch(symbol: str, candle_cache: dict[str, dict]) -> tuple[str, dict | N
 
 
 def run_scan():
-    log.info("=== AXIS ENGINE v2.1.0 scan starting ===")
+    log.info("=== AXIS ENGINE v2.2.0 scan starting ===")
     t_start = time.monotonic()
     state = load_state()
     candle_cache = load_candle_cache()
