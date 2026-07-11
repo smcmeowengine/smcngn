@@ -1415,13 +1415,13 @@ def tune_symbol_weights(state: dict):
     history = state["signal_history"]
     by_symbol: dict[str, list[dict]] = {}
     for h in history:
-        if h.get("result") in ("win", "loss"):
+        if h.get("result") in ("win", "loss", "breakeven"):
             by_symbol.setdefault(h["symbol"], []).append(h)
     for symbol, trades in by_symbol.items():
         if len(trades) < SYMBOL_MIN_SAMPLE:
             continue
         recent = trades[-20:]
-        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
+        wr = sum(1 for h in recent if h["result"] in ("win", "breakeven")) / len(recent)
         avg_r = sum(h.get("r_realized", 0) for h in recent) / len(recent)
         # Blend win-rate and realized R so a high win-rate/low-R symbol
         # (small wins, occasional large losses -- see momentum_breakout)
@@ -1445,11 +1445,11 @@ def tune_pathway_weights(state: dict):
     })
     history = state["signal_history"]
     for pathway in weights:
-        relevant = [h for h in history if h.get("pathway") == pathway and h.get("result") in ("win", "loss")]
+        relevant = [h for h in history if h.get("pathway") == pathway and h.get("result") in ("win", "loss", "breakeven")]
         if len(relevant) < 15:
             continue
         recent = relevant[-40:]
-        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
+        wr = sum(1 for h in recent if h["result"] in ("win", "breakeven")) / len(recent)
         target = 0.85 + 0.5 * wr  # wr=0.5 -> 1.10 neutral-ish; wr=0.3 -> 1.0; wr=0.7 -> 1.20
         target = max(PATHWAY_WEIGHT_MIN, min(PATHWAY_WEIGHT_MAX, target))
         weights[pathway] += PATHWAY_WEIGHT_LEARNING_RATE * (target - weights[pathway])
@@ -1802,7 +1802,7 @@ def _close_out(state: dict, sig: dict, result: str, price: float):
     if result == "win":
         headline = "\u2705 *TP2 hit -- WIN*"
         emoji = "\U0001F44D"
-    elif sig.get("tp1_hit"):
+    elif result == "breakeven":
         headline = "\u2696\ufe0f *Stopped at breakeven*"
         emoji = "\U0001F44D"
     else:
@@ -1833,7 +1833,7 @@ def check_active_signals(state: dict, snapshot: dict):
         )
 
         if hit_sl:
-            _close_out(state, sig, "win" if sig.get("tp1_hit") else "loss", price)
+            _close_out(state, sig, "breakeven" if sig.get("tp1_hit") else "loss", price)
             continue
         if hit_tp2:
             _close_out(state, sig, "win", price)
@@ -1850,8 +1850,9 @@ def check_active_signals(state: dict, snapshot: dict):
 def generate_daily_summary(state: dict) -> str:
     cutoff = time.time() - 86400
     recent = [h for h in state["signal_history"] if h.get("ts", 0) >= cutoff]
-    resolved = [h for h in recent if h.get("result") in ("win", "loss")]
-    wins = [h for h in resolved if h["result"] == "win"]
+    resolved = [h for h in recent if h.get("result") in ("win", "loss", "breakeven")]
+    wins = [h for h in resolved if h["result"] in ("win", "breakeven")]
+    breakevens = [h for h in resolved if h["result"] == "breakeven"]
     losses = [h for h in resolved if h["result"] == "loss"]
     open_now = [h for h in recent if h.get("result") == "open"]
     total_r = sum(h.get("r_realized", 0.0) for h in resolved)
@@ -1861,7 +1862,7 @@ def generate_daily_summary(state: dict) -> str:
         "\U0001F4CA *AXIS ENGINE -- 24h Summary*",
         "",
         f"Signals fired: {len(recent)}",
-        f"Resolved: {len(resolved)}  (\u2705 {len(wins)}  \u274C {len(losses)})",
+        f"Resolved: {len(resolved)}  (\u2705 {len(wins)} incl. \u2696\ufe0f {len(breakevens)} BE  |  \u274C {len(losses)})",
         f"Still open: {len(open_now)}",
         f"Win rate: {win_rate:.1f}%",
         f"Net R: {total_r:+.2f}",
@@ -1873,7 +1874,7 @@ def generate_daily_summary(state: dict) -> str:
         lines.append("")
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
-            w = sum(1 for i in items if i["result"] == "win")
+            w = sum(1 for i in items if i["result"] in ("win", "breakeven"))
             lines.append(f"  \u2022 `{pw}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
     return "\n".join(lines)
 
