@@ -1635,21 +1635,27 @@ def _notify_tp1(sig: dict, price: float):
     r = _r_multiple(sig, price)
     text = (f"\U0001F525 *TP1 hit* -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
             f"Price: `{fmt_px(price)}`  |  +{r:.2f}R banked\n"
-            f"SL moved to breakeven (`{fmt_px(sig['entry'])}`).")
+            f"SL stays at (`{fmt_px(sig['sl'])}`) for tracking -- unchanged.\n"
+            f"\U0001F4A1 Optional: you can manually move your SL to entry "
+            f"(`{fmt_px(sig['entry'])}`) to lock in breakeven.")
     reply_telegram(text, sig.get("message_id"))
     react_telegram(sig.get("message_id"), "\U0001F525")
-    log.info("TP1 hit: %s %s +%.2fR, SL -> breakeven", sig["symbol"], sig["direction"], r)
+    log.info("TP1 hit: %s %s +%.2fR, SL unchanged at %.6f", sig["symbol"], sig["direction"], r, sig["sl"])
 
 
-def _close_out(state: dict, sig: dict, result: str, price: float):
-    r = _r_multiple(sig, price)
+def _close_out(state: dict, sig: dict, result: str, price: float,
+                r_override: float | None = None, exit_note: str | None = None):
+    r = r_override if r_override is not None else _r_multiple(sig, price)
     sig["result"] = result
     sig["exit_price"] = price
     sig["r_realized"] = r
     sig["closed_ts"] = int(time.time())
     _sync_history(state, sig)
 
-    if result == "win":
+    if result == "win" and exit_note == "tp1":
+        headline = "\u2705 *TP1 secured -- WIN*"
+        emoji = "\U0001F44D"
+    elif result == "win":
         headline = "\u2705 *TP2 hit -- WIN*"
         emoji = "\U0001F44D"
     elif result == "breakeven":
@@ -1658,8 +1664,13 @@ def _close_out(state: dict, sig: dict, result: str, price: float):
     else:
         headline = "\u274C *SL hit -- LOSS*"
         emoji = "\U0001F44E"
-    text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
-            f"Exit: `{fmt_px(price)}`  |  Result: {r:+.2f}R")
+
+    if exit_note == "tp1":
+        text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
+                f"SL hit at `{fmt_px(price)}` after TP1 was already banked -- Result: {r:+.2f}R")
+    else:
+        text = (f"{headline} -- {tg_escape(sig['symbol'])} {tg_escape(sig['direction'].upper())}\n"
+                f"Exit: `{fmt_px(price)}`  |  Result: {r:+.2f}R")
     reply_telegram(text, sig.get("message_id"))
     react_telegram(sig.get("message_id"), emoji)
     log.info("Signal resolved: %s %s %s -> %s (%.2fR)",
@@ -1689,14 +1700,20 @@ def _check_signal_against_candle(state: dict, sig: dict, candle: dict) -> bool:
     SL -> TP2 -> TP1 order (worst case first when a bar spans levels)."""
     direction = sig["direction"]
     if _level_hit(candle, sig["sl"], direction, "sl"):
-        _close_out(state, sig, "breakeven" if sig.get("tp1_hit") else "loss", sig["sl"])
+        if sig.get("tp1_hit"):
+            _close_out(state, sig, "win", sig["sl"], r_override=sig.get("tp1_r"), exit_note="tp1")
+        else:
+            _close_out(state, sig, "loss", sig["sl"])
         return True
     if _level_hit(candle, sig["tp2"], direction, "tp"):
         _close_out(state, sig, "win", sig["tp2"])
         return True
     if not sig.get("tp1_hit") and _level_hit(candle, sig["tp1"], direction, "tp"):
         sig["tp1_hit"] = True
-        sig["sl"] = sig["entry"]  # lock in breakeven once TP1 is banked
+        sig["tp1_r"] = _r_multiple(sig, sig["tp1"])  # R banked at TP1, credited even if SL is hit later
+        # SL intentionally left at its original level -- moving it to
+        # breakeven caused an immediate stop-out on the very next check
+        # whenever price pulled back to entry after a partial TP.
         _notify_tp1(sig, sig["tp1"])
         _sync_history(state, sig)
     return False
@@ -1719,13 +1736,18 @@ def _check_active_signals_by_mark(state: dict, sigs: list[dict], snapshot: dict,
             (price >= sig["tp1"]) if direction == "long" else (price <= sig["tp1"])
         )
         if hit_sl:
-            _close_out(state, sig, "breakeven" if sig.get("tp1_hit") else "loss", price)
+            if sig.get("tp1_hit"):
+                _close_out(state, sig, "win", price, r_override=sig.get("tp1_r"), exit_note="tp1")
+            else:
+                _close_out(state, sig, "loss", price)
         elif hit_tp2:
             _close_out(state, sig, "win", price)
         else:
             if hit_tp1:
                 sig["tp1_hit"] = True
-                sig["sl"] = sig["entry"]
+                sig["tp1_r"] = _r_multiple(sig, price)
+                # SL intentionally left at its original level -- see note
+                # in _check_signal_against_candle.
                 _notify_tp1(sig, price)
                 _sync_history(state, sig)
             remaining.append(sig)
