@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIS ENGINE v2.2.2
+AXIS ENGINE v3.0.0
 ==================
 Multi-timeframe SMC/ICT crypto perpetual signal engine for Hyperliquid.
 
@@ -560,7 +560,7 @@ def _default_state() -> dict:
         "symbol_weights": {},
         "corr_returns": {},
         "last_summary_ts": 0,
-        "meta": {"version": "2.2.2", "created": int(time.time())},
+        "meta": {"version": "3.0.0", "created": int(time.time())},
     }
 
 
@@ -1524,6 +1524,14 @@ def fmt_px(v: float) -> str:
     return f"{v:.6f}"
 
 
+def pathway_label(pathway: str) -> str:
+    """Display-only label for a pathway name, e.g. "liquidity_reversal" ->
+    "Liquidity Reversal". The underscored form (cand.pathway / sig["pathway"])
+    stays as-is everywhere else -- it's used as a dict key for pathway
+    weighting/stats, so only the Telegram-facing text is prettified here."""
+    return pathway.replace("_", " ").title()
+
+
 def confidence_bar(confidence: float) -> str:
     filled = round(confidence / 10)
     return "\u2588" * filled + "\u2591" * (10 - filled)
@@ -1533,8 +1541,8 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v2.2.2* -- {tg_escape(cand.symbol)}/USD",
-        f"{arrow}  |  Grade *{grade}*  |  Pathway: `{cand.pathway}`",
+        f"*AXIS ENGINE v3.0.0* -- {tg_escape(cand.symbol)}/USD",
+        f"{arrow}  |  Grade *{grade}*  |  Pathway: `{pathway_label(cand.pathway)}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
         f"SL:     `{fmt_px(cand.sl)}`",
@@ -1610,7 +1618,6 @@ def react_telegram(message_id: int | None, emoji: str) -> None:
 
 def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
                    bar_index: int, message_id: int | None) -> dict:
-    now_ms = int(time.time() * 1000)
     entry = {
         "symbol": cand.symbol, "direction": cand.direction, "pathway": cand.pathway,
         "combo": cand.combo_name, "entry": cand.entry, "sl": cand.sl,
@@ -1618,7 +1625,12 @@ def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
         "confidence": confidence, "grade": grade, "ts": int(time.time()),
         "bar_index": bar_index, "result": "open", "tp1_hit": False,
         "message_id": message_id,
-        "last_checked_ms": now_ms,  # watermark for intrabar SL/TP monitoring
+        # Watermark for intrabar SL/TP monitoring: the "t" (open time) of the
+        # last closed 15m candle already checked against this signal. None
+        # means "not checked yet" -- the first check falls back to the
+        # signal's creation timestamp. This MUST be bar-aligned, not a
+        # wall-clock timestamp -- see check_active_signals for why.
+        "last_checked_bar_t": None,
         # Market-price entries (trend_continuation, momentum_breakout, and
         # liquidity_reversal's no-breaker fallback) are filled the instant
         # the signal fires. Resting POI/zone entries start unfilled and
@@ -1771,7 +1783,7 @@ def _check_signal_against_candle(state: dict, sig: dict, candle: dict) -> bool:
 def _check_active_signals_by_mark(state: dict, sigs: list[dict], snapshot: dict, symbol: str) -> list[dict]:
     """Fallback for when no 15m candles are available at all (bundle fetch
     failed and nothing cached). Checks against live mark price; leaves
-    last_checked_ms untouched so the gap backfills once candles return."""
+    last_checked_bar_t untouched so the gap backfills once candles return."""
     info = snapshot.get(symbol)
     if not info or not info.get("mark"):
         return list(sigs)
@@ -1820,8 +1832,20 @@ def _check_active_signals_by_mark(state: dict, sigs: list[dict], snapshot: dict,
 
 def check_active_signals(state: dict, snapshot: dict, bundles: dict, candle_cache: dict):
     """Monitors every open signal against closed 15m candle highs/lows
-    since it was last checked, using candles already fetched this scan."""
-    now_ms = int(time.time() * 1000)
+    since it was last checked, using candles already fetched this scan.
+
+    The watermark used to find "new" bars MUST be bar-aligned (a candle
+    "t"), not a wall-clock timestamp. The previous implementation stored
+    last_checked_ms = time.time() at the end of every scan and then tested
+    `candle["t"] >= last_checked_ms`. Since candle "t" values are quantized
+    to 15m boundaries while last_checked_ms is real wall-clock time (always
+    a little *after* the boundary, due to scan/fetch processing time), the
+    freshly-closed candle's "t" is always strictly less than the watermark
+    recorded at the end of the previous scan -- so it was silently excluded
+    from `new_bars` every single time. In practice this meant only the very
+    first check after a signal was recorded could ever see a candle; every
+    check after that saw an empty new_bars list, so TP/SL hits were never
+    detected and no Telegram reply was ever sent."""
     by_symbol: dict[str, list[dict]] = {}
     for sig in state["active_signals"]:
         by_symbol.setdefault(sig["symbol"], []).append(sig)
@@ -1838,14 +1862,23 @@ def check_active_signals(state: dict, snapshot: dict, bundles: dict, candle_cach
         open_sigs = list(sigs)
         closed_ids = set()
         for sig in open_sigs:
-            watermark = sig.get("last_checked_ms") or (int(sig.get("ts", 0)) * 1000)
-            new_bars = [c for c in candles if c["t"] >= watermark]  # only bars closed since last check
+            last_bar_t = sig.get("last_checked_bar_t")
+            if last_bar_t is None:
+                # Not checked yet: include any closed candle from the
+                # signal's creation time onward (inclusive).
+                watermark = int(sig.get("ts", 0)) * 1000
+                new_bars = [c for c in candles if c["t"] >= watermark]
+            else:
+                # Already checked up through last_bar_t: only bars that
+                # opened strictly after it are "new".
+                new_bars = [c for c in candles if c["t"] > last_bar_t]
             for candle in new_bars:
                 if _check_signal_against_candle(state, sig, candle):
                     closed_ids.add(id(sig))
                     break
-            if id(sig) not in closed_ids:
-                sig["last_checked_ms"] = now_ms
+                sig["last_checked_bar_t"] = candle["t"]
+            if id(sig) not in closed_ids and new_bars:
+                sig["last_checked_bar_t"] = new_bars[-1]["t"]
 
         for sig in open_sigs:
             if id(sig) not in closed_ids:
@@ -1886,7 +1919,7 @@ def generate_daily_summary(state: dict) -> str:
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
             w = sum(1 for i in items if i["result"] in ("win", "breakeven"))
-            lines.append(f"  \u2022 `{pw}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
+            lines.append(f"  \u2022 `{pathway_label(pw)}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
     return "\n".join(lines)
 
 
@@ -1969,7 +2002,7 @@ def _prefetch(symbol: str, candle_cache: dict[str, dict]) -> tuple[str, dict | N
 
 
 def run_scan():
-    log.info("=== AXIS ENGINE v2.2.2 scan starting ===")
+    log.info("=== AXIS ENGINE v3.0.0 scan starting ===")
     t_start = time.monotonic()
     state = load_state()
     candle_cache = load_candle_cache()
