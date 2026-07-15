@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIS ENGINE v3.0.0
+AXIS ENGINE v3.1.0
 ==================
 Multi-timeframe SMC/ICT crypto perpetual signal engine for Hyperliquid.
 
@@ -13,7 +13,8 @@ Key components:
     session liquidity weight, noise index, market breadth) driving both
     threshold selection and per-pathway eligibility.
   - Dynamic correlation-cluster deduplication from realized returns.
-  - Self-tuning per-pathway/per-symbol confidence weighting from history.
+  - Self-tuning per-pathway/per-symbol/per-combo confidence weighting from
+    history.
   - Structure-aware, liquidity-target TP/SL clipped to real liquidity
     pools, order blocks, and volume-profile value-area edges.
   - Session Volume Profile (POC / Value Area / VWAP) feeding TP clipping
@@ -113,6 +114,13 @@ GOVERNOR_MIN_INTERVAL_S = 3600  # rate-limit threshold nudges to once/hour
 PATHWAY_WEIGHT_LEARNING_RATE = 0.04
 PATHWAY_WEIGHT_MIN, PATHWAY_WEIGHT_MAX = 0.75, 1.30
 
+# Same shrink-toward-neutral drift, but keyed on `combo` (scalp/intraday/
+# swing) instead of pathway. Segmenting win rate by combo surfaces edges
+# that pathway-level weighting alone can't see -- e.g. intraday setups
+# under-perform scalp setups even within the same pathway.
+COMBO_WEIGHT_LEARNING_RATE = 0.04
+COMBO_WEIGHT_MIN, COMBO_WEIGHT_MAX = 0.75, 1.30
+
 # --- Setup Grade -> risk sizing hint (percent of equity), informational ---
 GRADE_SIZE_TABLE = {
     ("A+", "scalp"): 1.00, ("A+", "intraday"): 1.25, ("A+", "swing"): 1.50,
@@ -163,6 +171,20 @@ MIN_OI_USD = 3_000_000
 MIN_ATR_PCT = 0.0012
 MAX_ATR_PCT = 0.12
 MIN_RR = 1.4
+
+# Per (combo, pathway) RR floor overrides, applied on top of MIN_RR.
+# `intraday` + `liquidity_reversal` is both the largest segment (n=62, half
+# the dataset) and the weakest (37.1% WR, vs 61.0% for scalp+liquidity_
+# reversal), so it's held to a stricter RR bar than everything else so
+# weaker setups get filtered pre-signal rather than showing up post-hoc as
+# losses. Empty by default; populate/adjust per-pair as trailing data warrants.
+MIN_RR_OVERRIDES: dict[tuple[str, str], float] = {
+    ("intraday", "liquidity_reversal"): 1.9,
+}
+
+
+def min_rr_for(combo_name: str, pathway: str) -> float:
+    return MIN_RR_OVERRIDES.get((combo_name, pathway), MIN_RR)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -556,6 +578,9 @@ def _default_state() -> dict:
         "governor": {"threshold": 66.0, "last_adjust_ts": 0, "daily_count_ema": 6.0},
         "pathway_weights": {
             "liquidity_reversal": 1.0, "trend_continuation": 1.0, "momentum_breakout": 1.0,
+        },
+        "combo_weights": {
+            "scalp": 1.0, "intraday": 1.0, "swing": 1.0,
         },
         "symbol_weights": {},
         "corr_returns": {},
@@ -1088,7 +1113,7 @@ def build_pathway_liquidity_reversal(symbol: str, bundle: dict, combo_name: str,
         cand = Candidate(symbol, direction, "liquidity_reversal", combo_name,
                           entry, sl, tp1, tp2, confluences, atr_val,
                           resting_entry=(breaker is not None))
-        if cand.rr() >= MIN_RR:
+        if cand.rr() >= min_rr_for(combo_name, "liquidity_reversal"):
             return cand
     return None
 
@@ -1159,7 +1184,7 @@ def build_pathway_trend_continuation(symbol: str, bundle: dict, combo_name: str,
 
     cand = Candidate(symbol, direction, "trend_continuation", combo_name,
                       entry, sl, tp1, tp2, confluences, atr_val)
-    if cand.rr() >= MIN_RR:
+    if cand.rr() >= min_rr_for(combo_name, "trend_continuation"):
         return cand
     return None
 
@@ -1229,7 +1254,7 @@ def build_pathway_momentum_breakout(symbol: str, bundle: dict, combo_name: str,
 
     cand = Candidate(symbol, direction, "momentum_breakout", combo_name,
                       entry, sl, tp1, tp2, confluences, atr_val)
-    if cand.rr() >= MIN_RR:
+    if cand.rr() >= min_rr_for(combo_name, "momentum_breakout"):
         return cand
     return None
 
@@ -1257,7 +1282,7 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
     positive_count = len(cand.confluences) - caution_count
     z += 0.9 * (positive_count - 1.5)
     z -= 0.8 * caution_count
-    z += 1.1 * (cand.rr() - MIN_RR)
+    z += 1.1 * (cand.rr() - min_rr_for(cand.combo_name, cand.pathway))
     z += 1.3 * (regime.composite_favorability() - 0.5)
 
     # BTC macro alignment bonus/penalty (majors and high-beta alts especially)
@@ -1281,13 +1306,17 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
         vwap_aligned = (cand.entry >= vp["vwap"]) if cand.direction == "long" else (cand.entry <= vp["vwap"])
         z += 0.4 if vwap_aligned else -0.25
 
-    # self-tuning pathway/symbol weights, drifted by tune_pathway_weights()
-    # and tune_symbol_weights() toward recent win-rate, shrunk toward 1.0
+    # self-tuning pathway/symbol/combo weights, drifted by
+    # tune_pathway_weights(), tune_symbol_weights(), and tune_combo_weights()
+    # toward recent win-rate, shrunk toward 1.0
     pathway_weight = state["pathway_weights"].get(cand.pathway, 1.0)
     z += 2.8 * (pathway_weight - 1.0)
 
     symbol_weight = state.get("symbol_weights", {}).get(cand.symbol, 1.0)
     z += 2.2 * (symbol_weight - 1.0)
+
+    combo_weight = state.get("combo_weights", {}).get(cand.combo_name, 1.0)
+    z += 2.5 * (combo_weight - 1.0)
 
     confidence = 100 * logistic(z)
     return round(confidence, 2)
@@ -1305,13 +1334,13 @@ def tune_symbol_weights(state: dict):
     history = state["signal_history"]
     by_symbol: dict[str, list[dict]] = {}
     for h in history:
-        if h.get("result") in ("win", "loss", "breakeven"):
+        if h.get("result") in ("win", "loss"):
             by_symbol.setdefault(h["symbol"], []).append(h)
     for symbol, trades in by_symbol.items():
         if len(trades) < SYMBOL_MIN_SAMPLE:
             continue
         recent = trades[-20:]
-        wr = sum(1 for h in recent if h["result"] in ("win", "breakeven")) / len(recent)
+        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
         avg_r = sum(h.get("r_realized", 0) for h in recent) / len(recent)
         # blend win-rate and realized R so small-wins/big-losses symbols
         # aren't scored the same as genuine edge
@@ -1331,15 +1360,42 @@ def tune_pathway_weights(state: dict):
     })
     history = state["signal_history"]
     for pathway in weights:
-        relevant = [h for h in history if h.get("pathway") == pathway and h.get("result") in ("win", "loss", "breakeven")]
+        relevant = [h for h in history if h.get("pathway") == pathway and h.get("result") in ("win", "loss")]
         if len(relevant) < 15:
             continue
         recent = relevant[-40:]
-        wr = sum(1 for h in recent if h["result"] in ("win", "breakeven")) / len(recent)
+        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
         target = 0.85 + 0.5 * wr  # wr=0.5 -> 1.10 neutral-ish; wr=0.3 -> 1.0; wr=0.7 -> 1.20
         target = max(PATHWAY_WEIGHT_MIN, min(PATHWAY_WEIGHT_MAX, target))
         weights[pathway] += PATHWAY_WEIGHT_LEARNING_RATE * (target - weights[pathway])
         weights[pathway] = max(PATHWAY_WEIGHT_MIN, min(PATHWAY_WEIGHT_MAX, weights[pathway]))
+
+
+COMBO_MIN_SAMPLE = 15
+
+def tune_combo_weights(state: dict):
+    """Same shrink-toward-neutral self-tuning as tune_pathway_weights(), but
+    keyed on `combo` (scalp/intraday/swing) rather than pathway. Wired into
+    score_candidate() alongside pathway/symbol weights so a structurally
+    weaker combo -- e.g. intraday, and especially intraday+liquidity_
+    reversal -- needs a higher confluence/RR bar to clear the acceptance
+    threshold, without having to touch pathway-level weighting (which is
+    shared across all three combos and would over- or under-correct the
+    other two)."""
+    weights = state.setdefault("combo_weights", {
+        "scalp": 1.0, "intraday": 1.0, "swing": 1.0,
+    })
+    history = state["signal_history"]
+    for combo_name in weights:
+        relevant = [h for h in history if h.get("combo") == combo_name and h.get("result") in ("win", "loss")]
+        if len(relevant) < COMBO_MIN_SAMPLE:
+            continue
+        recent = relevant[-40:]
+        wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
+        target = 0.85 + 0.5 * wr  # same mapping as tune_pathway_weights: wr=0.5 -> 1.10, wr=0.3 -> 1.0, wr=0.7 -> 1.20
+        target = max(COMBO_WEIGHT_MIN, min(COMBO_WEIGHT_MAX, target))
+        weights[combo_name] += COMBO_WEIGHT_LEARNING_RATE * (target - weights[combo_name])
+        weights[combo_name] = max(COMBO_WEIGHT_MIN, min(COMBO_WEIGHT_MAX, weights[combo_name]))
 
 
 def grade_for_confidence(confidence: float) -> str:
@@ -1450,8 +1506,9 @@ def passes_hard_filters(symbol: str, snapshot: dict, atr_pct: float, cand: Candi
         return False, f"OI too low (${info['oi_usd']:,.0f})"
     if not (MIN_ATR_PCT <= atr_pct <= MAX_ATR_PCT):
         return False, f"ATR% out of band ({atr_pct:.4f})"
-    if cand.rr() < MIN_RR:
-        return False, f"RR too low ({cand.rr():.2f})"
+    req_rr = min_rr_for(cand.combo_name, cand.pathway)
+    if cand.rr() < req_rr:
+        return False, f"RR too low ({cand.rr():.2f} < {req_rr:.2f})"
     poi_mult = POI_ATR_MULT.get(cand.combo_name, 1.0)
     max_dist = min(cand.atr_val * poi_mult, cand.entry * POI_MAX_PCT_OF_PRICE)
     if abs(cand.entry - info["mark"]) > max_dist:
@@ -1653,11 +1710,50 @@ def _r_multiple(sig: dict, price: float) -> float:
 
 
 def _sync_history(state: dict, sig: dict):
+    # Audited: every current call site sets sig["tp1_r"] BEFORE calling this
+    # (see the TP1-hit branches in _check_signal_against_candle and
+    # _check_active_signals_by_mark), so h.update(sig) always propagates a
+    # populated tp1_r once TP1 has been banked. The tp1_r: null rows seen in
+    # existing history predate that ordering and are backfilled once at
+    # startup by reconcile_tp1_r() below rather than left stale.
     for h in state["signal_history"]:
         if h.get("ts") == sig.get("ts") and h.get("symbol") == sig.get("symbol") \
            and h.get("direction") == sig.get("direction"):
             h.update(sig)
             return
+
+
+def reconcile_tp1_r(state: dict) -> int:
+    """One-time-per-entry backfill for history rows where tp1_hit is True
+    but tp1_r was never recorded. tp1_r is fully determined by the stored
+    entry/risk/tp1 fields (it's the R-multiple of the TP1 price, independent
+    of when/how the row was written), so it can be recomputed exactly rather
+    than left null. Idempotent: only touches rows currently missing it."""
+    fixed = 0
+    for h in state["signal_history"]:
+        if h.get("tp1_hit") and h.get("tp1_r") is None and h.get("tp1") is not None:
+            h["tp1_r"] = _r_multiple(h, h["tp1"])
+            fixed += 1
+    if fixed:
+        log.info("Reconciled tp1_r for %d historical signal(s) with tp1_hit=True but tp1_r=null.", fixed)
+    return fixed
+
+
+def _guard_sl_at_entry_post_tp1(sig: dict):
+    """SL is intentionally never moved to entry after TP1 (see the note in
+    _check_signal_against_candle) -- doing so previously caused an immediate
+    stop-out on the very next check whenever price pulled back to entry
+    after a partial TP, and legacy history rows where it happened were still
+    counted as "win" despite having negative realized R. If SL is ever found
+    equal to entry with TP1 already banked, that invariant has been broken
+    somewhere -- log it loudly rather than let it silently resolve as a
+    bogus win."""
+    if sig.get("tp1_hit") and sig["sl"] == sig["entry"]:
+        log.error(
+            "BUG: SL == entry (%.6f) with TP1 already banked for %s %s (ts=%s) -- "
+            "SL should never move to breakeven; investigate before trusting this record.",
+            sig["sl"], sig["symbol"], sig["direction"], sig.get("ts"),
+        )
 
 
 def _notify_tp1(sig: dict, price: float):
@@ -1674,7 +1770,15 @@ def _notify_tp1(sig: dict, price: float):
 
 def _close_out(state: dict, sig: dict, result: str, price: float,
                 r_override: float | None = None, exit_note: str | None = None):
+    if result == "win" and exit_note == "tp1":
+        _guard_sl_at_entry_post_tp1(sig)
     r = r_override if r_override is not None else _r_multiple(sig, price)
+    if result == "win" and r < 0:
+        log.error(
+            "BUG: resolving %s %s (ts=%s) as a WIN with negative r_realized (%.2fR) -- "
+            "this should never happen; investigate before trusting this record.",
+            sig["symbol"], sig["direction"], sig.get("ts"), r,
+        )
     sig["result"] = result
     sig["exit_price"] = price
     sig["r_realized"] = r
@@ -1689,9 +1793,6 @@ def _close_out(state: dict, sig: dict, result: str, price: float,
         emoji = "\U0001F44D"
     elif result == "win":
         headline = "\u2705 *TP2 hit -- WIN*"
-        emoji = "\U0001F44D"
-    elif result == "breakeven":
-        headline = "\u2696\ufe0f *Stopped at breakeven*"
         emoji = "\U0001F44D"
     else:
         headline = "\u274C *SL hit -- LOSS*"
@@ -1890,14 +1991,16 @@ def check_active_signals(state: dict, snapshot: dict, bundles: dict, candle_cach
 def generate_daily_summary(state: dict) -> str:
     cutoff = time.time() - 86400
     recent = [h for h in state["signal_history"] if h.get("ts", 0) >= cutoff]
-    resolved = [h for h in recent if h.get("result") in ("win", "loss", "breakeven")]
-    wins = [h for h in resolved if h["result"] in ("win", "breakeven")]
-    breakevens = [h for h in resolved if h["result"] == "breakeven"]
+    # "breakeven" was a legacy result value from a since-removed SL-to-
+    # breakeven code path; nothing sets it anymore, so only win/loss count
+    # as resolved here.
+    resolved = [h for h in recent if h.get("result") in ("win", "loss")]
+    wins = [h for h in resolved if h["result"] == "win"]
     losses = [h for h in resolved if h["result"] == "loss"]
     open_now = [h for h in recent if h.get("result") == "open"]
     expired = [h for h in recent if h.get("result") == "expired"]
     # win-rate/R stats intentionally exclude "expired" (never filled, so no
-    # trade was ever actually taken) -- only win/loss/breakeven count here.
+    # trade was ever actually taken) -- only win/loss count here.
     total_r = sum(h.get("r_realized", 0.0) for h in resolved)
     win_rate = (len(wins) / len(resolved) * 100) if resolved else 0.0
 
@@ -1905,7 +2008,7 @@ def generate_daily_summary(state: dict) -> str:
         "\U0001F4CA *AXIS ENGINE -- 24h Summary*",
         "",
         f"Signals fired: {len(recent)}",
-        f"Resolved: {len(resolved)}  (\u2705 {len(wins)} incl. \u2696\ufe0f {len(breakevens)} BE  |  \u274C {len(losses)})",
+        f"Resolved: {len(resolved)}  (\u2705 {len(wins)}  |  \u274C {len(losses)})",
         f"Still open: {len(open_now)}",
         f"Expired (never filled): {len(expired)}",
         f"Win rate: {win_rate:.1f}%",
@@ -1913,13 +2016,20 @@ def generate_daily_summary(state: dict) -> str:
     ]
     if resolved:
         by_pathway: dict[str, list] = {}
+        by_combo: dict[str, list] = {}
         for h in resolved:
             by_pathway.setdefault(h["pathway"], []).append(h)
+            by_combo.setdefault(h.get("combo", "?"), []).append(h)
         lines.append("")
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
-            w = sum(1 for i in items if i["result"] in ("win", "breakeven"))
+            w = sum(1 for i in items if i["result"] == "win")
             lines.append(f"  \u2022 `{pathway_label(pw)}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
+        lines.append("")
+        lines.append("By combo:")
+        for combo_name, items in by_combo.items():
+            w = sum(1 for i in items if i["result"] == "win")
+            lines.append(f"  \u2022 `{combo_name}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
     return "\n".join(lines)
 
 
@@ -2005,6 +2115,7 @@ def run_scan():
     log.info("=== AXIS ENGINE v3.0.0 scan starting ===")
     t_start = time.monotonic()
     state = load_state()
+    reconcile_tp1_r(state)
     candle_cache = load_candle_cache()
     snapshot = get_market_snapshot()
 
@@ -2036,6 +2147,7 @@ def run_scan():
 
     tune_pathway_weights(state)
     tune_symbol_weights(state)
+    tune_combo_weights(state)
 
     fired = []
     threshold = state["governor"]["threshold"]
