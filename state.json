@@ -1,1 +1,236 @@
-{}
+{
+  "active_signals": [
+    {
+      "symbol": "AAVE",
+      "direction": "long",
+      "pathway": "trend_continuation",
+      "combo": "intraday",
+      "entry": 98.102,
+      "sl": 96.810105,
+      "risk": 1.291895000000011,
+      "tp1": 100.04,
+      "tp2": 101.015,
+      "confidence": 96.25,
+      "grade": "A+",
+      "ts": 1784107845,
+      "bar_index": 1982341,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3277,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "UNI",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 3.6153,
+      "sl": 3.5641915,
+      "risk": 0.05110849999999978,
+      "tp1": 3.6984333333333335,
+      "tp2": 3.7576,
+      "confidence": 94.7,
+      "grade": "A+",
+      "ts": 1784107846,
+      "bar_index": 1982341,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3278,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "PENDLE",
+      "direction": "long",
+      "pathway": "trend_continuation",
+      "combo": "intraday",
+      "entry": 1.5649,
+      "sl": 1.5261715,
+      "risk": 0.038728499999999944,
+      "tp1": 1.6229927499999999,
+      "tp2": 1.6617212499999998,
+      "confidence": 98.05,
+      "grade": "A+",
+      "ts": 1784107846,
+      "bar_index": 1982341,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3279,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    }
+  ],
+  "signal_history": [
+    {
+      "symbol": "AAVE",
+      "direction": "long",
+      "pathway": "trend_continuation",
+      "combo": "intraday",
+      "entry": 98.102,
+      "sl": 96.810105,
+      "risk": 1.291895000000011,
+      "tp1": 100.04,
+      "tp2": 101.015,
+      "confidence": 96.25,
+      "grade": "A+",
+      "ts": 1784107845,
+      "bar_index": 1982341,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3277,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "UNI",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 3.6153,
+      "sl": 3.5641915,
+      "risk": 0.05110849999999978,
+      "tp1": 3.6984333333333335,
+      "tp2": 3.7576,
+      "confidence": 94.7,
+      "grade": "A+",
+      "ts": 1784107846,
+      "bar_index": 1982341,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3278,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "PENDLE",
+      "direction": "long",
+      "pathway": "trend_continuation",
+      "combo": "intraday",
+      "entry": 1.5649,
+      "sl": 1.5261715,
+      "risk": 0.038728499999999944,
+      "tp1": 1.6229927499999999,
+      "tp2": 1.6617212499999998,
+      "confidence": 98.05,
+      "grade": "A+",
+      "ts": 1784107846,
+      "bar_index": 1982341,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3279,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    }
+  ],
+  "cooldowns": {
+    "AAVE:long": 1982341,
+    "UNI:long": 1982341,
+    "PENDLE:long": 1982341
+  },
+  "atr_pct_memory": {
+    "BTC": [
+      0.010696796687542132
+    ],
+    "ETH": [
+      0.015189693865377538
+    ],
+    "HYPE": [
+      0.019565168469228712
+    ],
+    "ZEC": [
+      0.029249618017649547
+    ],
+    "NEAR": [
+      0.023473061202264594
+    ],
+    "ONDO": [
+      0.019121100650945463
+    ],
+    "SUI": [
+      0.017483820116835223
+    ],
+    "PENGU": [
+      0.021384679812857216
+    ],
+    "BNB": [
+      0.009356564749306137
+    ],
+    "SOL": [
+      0.015149708848486734
+    ],
+    "TRX": [
+      0.00471350587113434
+    ],
+    "BCH": [
+      0.018694856617820256
+    ],
+    "DOGE": [
+      0.014118884146958844
+    ],
+    "ADA": [
+      0.020606280472960672
+    ],
+    "DOT": [
+      0.017296716601110703
+    ],
+    "TAO": [
+      0.02263764196700719
+    ],
+    "AVAX": [
+      0.01826840779054203
+    ],
+    "LINK": [
+      0.015473346532920818
+    ],
+    "AAVE": [
+      0.02293318936972281
+    ],
+    "XRP": [
+      0.013315441006074106
+    ],
+    "XLM": [
+      0.01847320803715579
+    ],
+    "UNI": [
+      0.027501245334450943
+    ],
+    "LTC": [
+      0.01326886244207749
+    ],
+    "APT": [
+      0.02061835051197454
+    ],
+    "PENDLE": [
+      0.025778884785508646
+    ]
+  },
+  "governor": {
+    "threshold": 66.0,
+    "last_adjust_ts": 0,
+    "daily_count_ema": 5.7
+  },
+  "pathway_weights": {
+    "liquidity_reversal": 1.0,
+    "trend_continuation": 1.0,
+    "momentum_breakout": 1.0
+  },
+  "combo_weights": {
+    "scalp": 1.0,
+    "intraday": 1.0,
+    "swing": 1.0
+  },
+  "symbol_weights": {},
+  "corr_returns": {},
+  "last_summary_ts": 0,
+  "meta": {
+    "version": "3.0.0",
+    "created": 1784107840
+  }
+}
