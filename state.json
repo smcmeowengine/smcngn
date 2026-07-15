@@ -17,7 +17,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3278,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -38,7 +38,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3279,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.5
@@ -60,7 +60,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3287,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -81,7 +81,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3321,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -102,28 +102,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3323,
-      "last_checked_bar_t": 1784132100000,
-      "entry_filled": true,
-      "bars_pending": 0
-    },
-    {
-      "symbol": "TRX",
-      "direction": "short",
-      "pathway": "liquidity_reversal",
-      "combo": "intraday",
-      "entry": 0.32748,
-      "sl": 0.328923,
-      "risk": 0.0014430000000000276,
-      "tp1": 0.3256266666666667,
-      "tp2": 0.3235733333333333,
-      "confidence": 89.89,
-      "grade": "A+",
-      "ts": 1784123125,
-      "bar_index": 1982358,
-      "result": "open",
-      "tp1_hit": false,
-      "message_id": 3341,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -142,11 +121,12 @@
       "ts": 1784128528,
       "bar_index": 1982364,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3371,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.7
     },
     {
       "symbol": "AAVE",
@@ -165,7 +145,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3372,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -186,7 +166,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3373,
-      "last_checked_bar_t": 1784132100000,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -207,7 +187,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3378,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784133000000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -228,6 +208,27 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3379,
+      "last_checked_bar_t": 1784133000000,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "TRX",
+      "direction": "short",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.32362,
+      "sl": 0.32893795,
+      "risk": 0.00531794999999996,
+      "tp1": 0.3156430750000001,
+      "tp2": 0.30872974000000014,
+      "confidence": 97.73,
+      "grade": "A+",
+      "ts": 1784133928,
+      "bar_index": 1982370,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3395,
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
@@ -403,12 +404,15 @@
       "grade": "A+",
       "ts": 1784123125,
       "bar_index": 1982358,
-      "result": "open",
+      "result": "win",
       "tp1_hit": false,
       "message_id": 3341,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784132100000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "exit_price": 0.3235733333333333,
+      "r_realized": 2.71,
+      "closed_ts": 1784133922
     },
     {
       "symbol": "HYPE",
@@ -425,11 +429,12 @@
       "ts": 1784128528,
       "bar_index": 1982364,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3371,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784132100000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.7
     },
     {
       "symbol": "AAVE",
@@ -514,6 +519,27 @@
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
+    },
+    {
+      "symbol": "TRX",
+      "direction": "short",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.32362,
+      "sl": 0.32893795,
+      "risk": 0.00531794999999996,
+      "tp1": 0.3156430750000001,
+      "tp2": 0.30872974000000014,
+      "confidence": 97.73,
+      "grade": "A+",
+      "ts": 1784133928,
+      "bar_index": 1982370,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3395,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
     }
   ],
   "cooldowns": {
@@ -524,7 +550,7 @@
     "XRP:long": 1982355,
     "ADA:long": 1982356,
     "ZEC:short": 5947097,
-    "TRX:short": 1982358,
+    "TRX:short": 1982370,
     "HYPE:short": 1982364,
     "AAVE:short": 1982364,
     "NEAR:short": 1982368,
@@ -560,6 +586,7 @@
       0.01031197482905153,
       0.010542001454029322,
       0.010542001454029322,
+      0.010542001454029322,
       0.010542001454029322
     ],
     "ETH": [
@@ -589,6 +616,7 @@
       0.014635977232867357,
       0.014635977232867357,
       0.014635977232867357,
+      0.015748168397116544,
       0.015748168397116544,
       0.015748168397116544,
       0.015748168397116544
@@ -704,6 +732,7 @@
       0.018981021341330808,
       0.02073737885488267,
       0.02073737885488267,
+      0.02073737885488267,
       0.02073737885488267
     ],
     "SUI": [
@@ -733,6 +762,7 @@
       0.016750599212239745,
       0.016750599212239745,
       0.016750599212239745,
+      0.016891111231087858,
       0.016891111231087858,
       0.016891111231087858,
       0.016891111231087858
@@ -766,6 +796,7 @@
       0.020891847094177067,
       0.021255669331496644,
       0.021255669331496644,
+      0.021255669331496644,
       0.021255669331496644
     ],
     "BNB": [
@@ -795,6 +826,7 @@
       0.009053700069659464,
       0.009053700069659464,
       0.009053700069659464,
+      0.00938185426896304,
       0.00938185426896304,
       0.00938185426896304,
       0.00938185426896304
@@ -828,6 +860,7 @@
       0.014711886496496964,
       0.01517434895433551,
       0.01517434895433551,
+      0.01517434895433551,
       0.01517434895433551
     ],
     "TRX": [
@@ -848,7 +881,8 @@
       0.004651811951860638,
       0.004651811951860638,
       0.004651811951860638,
-      0.004651811951860638
+      0.004651811951860638,
+      0.004703487189998909
     ],
     "BCH": [
       0.018694856617820256,
@@ -877,6 +911,7 @@
       0.018185507820873213,
       0.018185507820873213,
       0.018185507820873213,
+      0.018332379174982424,
       0.018332379174982424,
       0.018332379174982424,
       0.018332379174982424
@@ -908,6 +943,7 @@
       0.014103339864922135,
       0.014103339864922135,
       0.014103339864922135,
+      0.014475507768885143,
       0.014475507768885143,
       0.014475507768885143,
       0.014475507768885143
@@ -989,6 +1025,7 @@
       0.02198724405395088,
       0.022186555931739908,
       0.022186555931739908,
+      0.022186555931739908,
       0.022186555931739908
     ],
     "AVAX": [
@@ -1020,6 +1057,7 @@
       0.01762578816056547,
       0.017445419534028863,
       0.017445419534028863,
+      0.017445419534028863,
       0.017445419534028863
     ],
     "LINK": [
@@ -1049,6 +1087,7 @@
       0.01508836259484274,
       0.01508836259484274,
       0.01508836259484274,
+      0.01576534385788737,
       0.01576534385788737,
       0.01576534385788737,
       0.01576534385788737
@@ -1103,6 +1142,7 @@
       0.018485867157078197,
       0.019627599621236405,
       0.019627599621236405,
+      0.019627599621236405,
       0.019627599621236405
     ],
     "UNI": [
@@ -1142,6 +1182,7 @@
       0.02020065216829041,
       0.020016100161054092,
       0.020016100161054092,
+      0.020016100161054092,
       0.020016100161054092
     ],
     "PENDLE": [
@@ -1151,7 +1192,7 @@
   "governor": {
     "threshold": 60.0,
     "last_adjust_ts": 1784120509.7069187,
-    "daily_count_ema": 8.810263994308091
+    "daily_count_ema": 9.329237594877283
   },
   "pathway_weights": {
     "liquidity_reversal": 1.0,
