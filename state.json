@@ -17,7 +17,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3278,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -38,7 +38,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3279,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.5
@@ -60,7 +60,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3287,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -81,7 +81,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3321,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -102,7 +102,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3323,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -123,7 +123,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3341,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -144,7 +144,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3371,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -165,7 +165,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3372,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -186,7 +186,49 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3373,
-      "last_checked_bar_t": 1784130300000,
+      "last_checked_bar_t": 1784131200000,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "NEAR",
+      "direction": "short",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 2.0628,
+      "sl": 2.0765930000000004,
+      "risk": 0.013793000000000166,
+      "tp1": 2.0421104999999997,
+      "tp2": 2.0252333333333334,
+      "confidence": 81.68,
+      "grade": "A",
+      "ts": 1784132126,
+      "bar_index": 1982368,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3378,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "DOT",
+      "direction": "short",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.84885,
+      "sl": 0.8580955,
+      "risk": 0.009245500000000018,
+      "tp1": 0.8344483333333333,
+      "tp2": 0.8207666666666666,
+      "confidence": 87.24,
+      "grade": "A+",
+      "ts": 1784132127,
+      "bar_index": 1982368,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3379,
+      "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
     }
@@ -430,6 +472,48 @@
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
+    },
+    {
+      "symbol": "NEAR",
+      "direction": "short",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 2.0628,
+      "sl": 2.0765930000000004,
+      "risk": 0.013793000000000166,
+      "tp1": 2.0421104999999997,
+      "tp2": 2.0252333333333334,
+      "confidence": 81.68,
+      "grade": "A",
+      "ts": 1784132126,
+      "bar_index": 1982368,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3378,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "DOT",
+      "direction": "short",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.84885,
+      "sl": 0.8580955,
+      "risk": 0.009245500000000018,
+      "tp1": 0.8344483333333333,
+      "tp2": 0.8207666666666666,
+      "confidence": 87.24,
+      "grade": "A+",
+      "ts": 1784132127,
+      "bar_index": 1982368,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3379,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
     }
   ],
   "cooldowns": {
@@ -442,7 +526,9 @@
     "ZEC:short": 5947097,
     "TRX:short": 1982358,
     "HYPE:short": 1982364,
-    "AAVE:short": 1982364
+    "AAVE:short": 1982364,
+    "NEAR:short": 1982368,
+    "DOT:short": 1982368
   },
   "atr_pct_memory": {
     "BTC": [
@@ -472,6 +558,7 @@
       0.01031197482905153,
       0.01031197482905153,
       0.01031197482905153,
+      0.010542001454029322,
       0.010542001454029322
     ],
     "ETH": [
@@ -501,6 +588,7 @@
       0.014635977232867357,
       0.014635977232867357,
       0.014635977232867357,
+      0.015748168397116544,
       0.015748168397116544
     ],
     "HYPE": [
@@ -582,6 +670,7 @@
       0.024341303074400793,
       0.024341303074400793,
       0.024341303074400793,
+      0.02411938106487984,
       0.02411938106487984
     ],
     "ONDO": [
@@ -611,6 +700,7 @@
       0.018981021341330808,
       0.018981021341330808,
       0.018981021341330808,
+      0.02073737885488267,
       0.02073737885488267
     ],
     "SUI": [
@@ -640,6 +730,7 @@
       0.016750599212239745,
       0.016750599212239745,
       0.016750599212239745,
+      0.016891111231087858,
       0.016891111231087858
     ],
     "PENGU": [
@@ -669,6 +760,7 @@
       0.020891847094177067,
       0.020891847094177067,
       0.020891847094177067,
+      0.021255669331496644,
       0.021255669331496644
     ],
     "BNB": [
@@ -698,6 +790,7 @@
       0.009053700069659464,
       0.009053700069659464,
       0.009053700069659464,
+      0.00938185426896304,
       0.00938185426896304
     ],
     "SOL": [
@@ -727,6 +820,7 @@
       0.014711886496496964,
       0.014711886496496964,
       0.014711886496496964,
+      0.01517434895433551,
       0.01517434895433551
     ],
     "TRX": [
@@ -776,6 +870,7 @@
       0.018185507820873213,
       0.018185507820873213,
       0.018185507820873213,
+      0.018332379174982424,
       0.018332379174982424
     ],
     "DOGE": [
@@ -805,6 +900,7 @@
       0.014103339864922135,
       0.014103339864922135,
       0.014103339864922135,
+      0.014475507768885143,
       0.014475507768885143
     ],
     "ADA": [
@@ -852,6 +948,7 @@
       0.016631468014201626,
       0.016631468014201626,
       0.016631468014201626,
+      0.016910402013390526,
       0.016910402013390526
     ],
     "TAO": [
@@ -881,6 +978,7 @@
       0.02198724405395088,
       0.02198724405395088,
       0.02198724405395088,
+      0.022186555931739908,
       0.022186555931739908
     ],
     "AVAX": [
@@ -910,6 +1008,7 @@
       0.01762578816056547,
       0.01762578816056547,
       0.01762578816056547,
+      0.017445419534028863,
       0.017445419534028863
     ],
     "LINK": [
@@ -939,6 +1038,7 @@
       0.01508836259484274,
       0.01508836259484274,
       0.01508836259484274,
+      0.01576534385788737,
       0.01576534385788737
     ],
     "AAVE": [
@@ -989,6 +1089,7 @@
       0.018485867157078197,
       0.018485867157078197,
       0.018485867157078197,
+      0.019627599621236405,
       0.019627599621236405
     ],
     "UNI": [
@@ -1026,6 +1127,7 @@
       0.02020065216829041,
       0.02020065216829041,
       0.02020065216829041,
+      0.020016100161054092,
       0.020016100161054092
     ],
     "PENDLE": [
@@ -1035,7 +1137,7 @@
   "governor": {
     "threshold": 60.0,
     "last_adjust_ts": 1784120509.7069187,
-    "daily_count_ema": 7.827486412726037
+    "daily_count_ema": 8.344737771453433
   },
   "pathway_weights": {
     "liquidity_reversal": 1.0,
