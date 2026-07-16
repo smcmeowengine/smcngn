@@ -15,11 +15,12 @@
       "ts": 1784107846,
       "bar_index": 1982341,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3278,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.63
     },
     {
       "symbol": "PENDLE",
@@ -38,7 +39,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3279,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.5
@@ -60,7 +61,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3287,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -81,7 +82,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3321,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -102,7 +103,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3323,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -123,7 +124,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3372,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -144,7 +145,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3373,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -165,7 +166,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3379,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -186,7 +187,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3395,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -207,7 +208,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3412,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -228,7 +229,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3477,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -247,11 +248,12 @@
       "ts": 1784164528,
       "bar_index": 5947214,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3482,
-      "last_checked_bar_t": 1784165400000,
+      "last_checked_bar_t": 1784166300000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.49
     }
   ],
   "signal_history": [
@@ -295,11 +297,12 @@
       "ts": 1784107846,
       "bar_index": 1982341,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3278,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784165400000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.63
     },
     {
       "symbol": "PENDLE",
@@ -672,11 +675,12 @@
       "ts": 1784164528,
       "bar_index": 5947214,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3482,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784165400000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.49
     }
   ],
   "cooldowns": {
@@ -748,6 +752,7 @@
       0.010331990553859626,
       0.010331990553859626,
       0.010331990553859626,
+      0.010331990553859626,
       0.010331990553859626
     ],
     "ETH": [
@@ -809,6 +814,7 @@
       0.015918665878415384,
       0.015918665878415384,
       0.015918665878415384,
+      0.015375723337803387,
       0.015375723337803387,
       0.015375723337803387,
       0.015375723337803387,
@@ -1056,6 +1062,7 @@
       0.017258976317754585,
       0.017258976317754585,
       0.017258976317754585,
+      0.017258976317754585,
       0.017258976317754585
     ],
     "PENGU": [
@@ -1117,6 +1124,7 @@
       0.021453768206134524,
       0.021453768206134524,
       0.021453768206134524,
+      0.021584823617724166,
       0.021584823617724166,
       0.021584823617724166,
       0.021584823617724166,
@@ -1192,6 +1200,7 @@
       0.009002371188115858,
       0.009002371188115858,
       0.009002371188115858,
+      0.009002371188115858,
       0.009002371188115858
     ],
     "SOL": [
@@ -1253,6 +1262,7 @@
       0.015352470435918432,
       0.015352470435918432,
       0.015352470435918432,
+      0.01482182707045485,
       0.01482182707045485,
       0.01482182707045485,
       0.01482182707045485,
@@ -1349,6 +1359,7 @@
       0.021377773684731382,
       0.021377773684731382,
       0.021377773684731382,
+      0.021377773684731382,
       0.021377773684731382
     ],
     "DOGE": [
@@ -1410,6 +1421,7 @@
       0.014912816925905358,
       0.014912816925905358,
       0.014912816925905358,
+      0.014201118874209582,
       0.014201118874209582,
       0.014201118874209582,
       0.014201118874209582,
@@ -1533,6 +1545,7 @@
       0.021343626434154536,
       0.021343626434154536,
       0.021343626434154536,
+      0.021343626434154536,
       0.021343626434154536
     ],
     "AVAX": [
@@ -1601,6 +1614,7 @@
       0.01673106934660879,
       0.01673106934660879,
       0.01673106934660879,
+      0.01673106934660879,
       0.01673106934660879
     ],
     "LINK": [
@@ -1662,6 +1676,7 @@
       0.015957504572502546,
       0.015957504572502546,
       0.015957504572502546,
+      0.015457523731493382,
       0.015457523731493382,
       0.015457523731493382,
       0.015457523731493382,
@@ -1758,6 +1773,7 @@
       0.01990715499994989,
       0.01990715499994989,
       0.01990715499994989,
+      0.01990715499994989,
       0.01990715499994989
     ],
     "UNI": [
@@ -1834,6 +1850,7 @@
       0.019221242128458223,
       0.019221242128458223,
       0.019221242128458223,
+      0.019221242128458223,
       0.019221242128458223
     ],
     "PENDLE": [
@@ -1843,7 +1860,7 @@
   "governor": {
     "threshold": 76.0,
     "last_adjust_ts": 1784164528.0282192,
-    "daily_count_ema": 17.55087201867557
+    "daily_count_ema": 17.69578481680801
   },
   "pathway_weights": {
     "liquidity_reversal": 1.0,
