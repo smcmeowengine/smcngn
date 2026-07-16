@@ -17,7 +17,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3278,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.63
@@ -39,7 +39,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3279,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.5
@@ -61,7 +61,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3287,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -82,28 +82,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3321,
-      "last_checked_bar_t": 1784187900000,
-      "entry_filled": true,
-      "bars_pending": 0
-    },
-    {
-      "symbol": "ADA",
-      "direction": "long",
-      "pathway": "momentum_breakout",
-      "combo": "intraday",
-      "entry": 0.16687,
-      "sl": 0.16131515,
-      "risk": 0.00555485,
-      "tp1": 0.17453,
-      "tp2": 0.18011,
-      "confidence": 97.85,
-      "grade": "A+",
-      "ts": 1784121323,
-      "bar_index": 1982356,
-      "result": "open",
-      "tp1_hit": false,
-      "message_id": 3323,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -122,11 +101,12 @@
       "ts": 1784128529,
       "bar_index": 1982364,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3372,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.54
     },
     {
       "symbol": "ZEC",
@@ -145,7 +125,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3373,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -166,7 +146,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3379,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.56
@@ -188,7 +168,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 3395,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -209,7 +189,7 @@
       "result": "open",
       "tp1_hit": true,
       "message_id": 3412,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
       "bars_pending": 0,
       "tp1_r": 1.16
@@ -229,11 +209,12 @@
       "ts": 1784160164,
       "bar_index": 1982399,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3477,
-      "last_checked_bar_t": 1784187900000,
+      "last_checked_bar_t": 1784188800000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.42
     }
   ],
   "signal_history": [
@@ -362,12 +343,15 @@
       "grade": "A+",
       "ts": 1784121323,
       "bar_index": 1982356,
-      "result": "open",
+      "result": "loss",
       "tp1_hit": false,
       "message_id": 3323,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784187900000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "exit_price": 0.16131515,
+      "r_realized": -1.0,
+      "closed_ts": 1784189719
     },
     {
       "symbol": "ZEC",
@@ -457,11 +441,12 @@
       "ts": 1784128529,
       "bar_index": 1982364,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3372,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784187900000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.54
     },
     {
       "symbol": "ZEC",
@@ -636,11 +621,12 @@
       "ts": 1784160164,
       "bar_index": 1982399,
       "result": "open",
-      "tp1_hit": false,
+      "tp1_hit": true,
       "message_id": 3477,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1784187900000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "tp1_r": 1.42
     },
     {
       "symbol": "ONDO",
@@ -811,6 +797,7 @@
       0.010143805213707167,
       0.010143805213707167,
       0.010143805213707167,
+      0.010528247140610686,
       0.010528247140610686
     ],
     "ETH": [
@@ -904,6 +891,7 @@
       0.015044308165368609,
       0.015044308165368609,
       0.015044308165368609,
+      0.014911802310153644,
       0.014911802310153644
     ],
     "HYPE": [
@@ -1096,6 +1084,7 @@
       0.02630410548648157,
       0.02630410548648157,
       0.02630410548648157,
+      0.027485800489242946,
       0.027485800489242946
     ],
     "SUI": [
@@ -1189,6 +1178,7 @@
       0.01779542593992124,
       0.01779542593992124,
       0.01779542593992124,
+      0.018950264096140066,
       0.018950264096140066
     ],
     "PENGU": [
@@ -1282,6 +1272,7 @@
       0.02169814004354937,
       0.02169814004354937,
       0.02169814004354937,
+      0.022931782984775637,
       0.022931782984775637
     ],
     "BNB": [
@@ -1375,6 +1366,7 @@
       0.00891895445418793,
       0.00891895445418793,
       0.00891895445418793,
+      0.009147050520339114,
       0.009147050520339114
     ],
     "SOL": [
@@ -1468,6 +1460,7 @@
       0.014575932136718366,
       0.014575932136718366,
       0.014575932136718366,
+      0.014910116396854122,
       0.014910116396854122
     ],
     "TRX": [
@@ -1580,6 +1573,7 @@
       0.02137072312957173,
       0.02137072312957173,
       0.02137072312957173,
+      0.021565447645551458,
       0.021565447645551458
     ],
     "DOGE": [
@@ -1673,6 +1667,7 @@
       0.014018840040522215,
       0.014018840040522215,
       0.014018840040522215,
+      0.014078206274732656,
       0.014078206274732656
     ],
     "ADA": [
@@ -1691,7 +1686,8 @@
       0.0201370956978482,
       0.0201370956978482,
       0.0201370956978482,
-      0.0201370956978482
+      0.0201370956978482,
+      0.020254065548915904
     ],
     "DOT": [
       0.017296716601110703,
@@ -1814,6 +1810,7 @@
       0.021125631779506417,
       0.021125631779506417,
       0.021125631779506417,
+      0.02178462317017081,
       0.02178462317017081
     ],
     "AVAX": [
@@ -1907,6 +1904,7 @@
       0.01625382201451926,
       0.01625382201451926,
       0.01625382201451926,
+      0.01666029586740472,
       0.01666029586740472
     ],
     "LINK": [
@@ -2000,6 +1998,7 @@
       0.01529470814454661,
       0.01529470814454661,
       0.01529470814454661,
+      0.015131227422325913,
       0.015131227422325913
     ],
     "AAVE": [
@@ -2114,6 +2113,7 @@
       0.01970976905698825,
       0.01970976905698825,
       0.01970976905698825,
+      0.01972627934145828,
       0.01972627934145828
     ],
     "UNI": [
@@ -2215,6 +2215,7 @@
       0.01879006710634215,
       0.01879006710634215,
       0.01879006710634215,
+      0.018838128188836564,
       0.018838128188836564
     ],
     "PENDLE": [
@@ -2222,9 +2223,9 @@
     ]
   },
   "governor": {
-    "threshold": 86.0,
-    "last_adjust_ts": 1784185305.6000695,
-    "daily_count_ema": 20.53236182186553
+    "threshold": 88.0,
+    "last_adjust_ts": 1784189726.166862,
+    "daily_count_ema": 20.579125639678978
   },
   "pathway_weights": {
     "liquidity_reversal": 1.0,
