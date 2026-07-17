@@ -1,1 +1,376 @@
-{}
+{
+  "active_signals": [
+    {
+      "symbol": "ZEC",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 547.78,
+      "sl": 519.6172,
+      "risk": 28.162799999999947,
+      "tp1": 589.78,
+      "tp2": 626.6358399999998,
+      "confidence": 96.66,
+      "grade": "A+",
+      "ts": 1784306726,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3780,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "SOL",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 75.022,
+      "sl": 72.99672,
+      "risk": 2.0252800000000093,
+      "tp1": 78.302,
+      "tp2": 80.96566666666668,
+      "confidence": 98.45,
+      "grade": "A+",
+      "ts": 1784306727,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3781,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "TAO",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 193.78,
+      "sl": 187.49505,
+      "risk": 6.284950000000009,
+      "tp1": 203.3,
+      "tp2": 210.81,
+      "confidence": 88.89,
+      "grade": "A+",
+      "ts": 1784306727,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3782,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "XLM",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.18765,
+      "sl": 0.18051055000000002,
+      "risk": 0.007139449999999992,
+      "tp1": 0.1968,
+      "tp2": 0.20749,
+      "confidence": 99.01,
+      "grade": "A+",
+      "ts": 1784306728,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3783,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "UNI",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 3.5472,
+      "sl": 3.4181924999999995,
+      "risk": 0.1290075000000006,
+      "tp1": 3.7412,
+      "tp2": 3.8471,
+      "confidence": 91.8,
+      "grade": "A+",
+      "ts": 1784306729,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3784,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "LTC",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 44.911,
+      "sl": 43.888295,
+      "risk": 1.022705000000002,
+      "tp1": 46.151,
+      "tp2": 47.77457400000001,
+      "confidence": 98.82,
+      "grade": "A+",
+      "ts": 1784306733,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3785,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    }
+  ],
+  "signal_history": [
+    {
+      "symbol": "ZEC",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 547.78,
+      "sl": 519.6172,
+      "risk": 28.162799999999947,
+      "tp1": 589.78,
+      "tp2": 626.6358399999998,
+      "confidence": 96.66,
+      "grade": "A+",
+      "ts": 1784306726,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3780,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "SOL",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 75.022,
+      "sl": 72.99672,
+      "risk": 2.0252800000000093,
+      "tp1": 78.302,
+      "tp2": 80.96566666666668,
+      "confidence": 98.45,
+      "grade": "A+",
+      "ts": 1784306727,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3781,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "TAO",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 193.78,
+      "sl": 187.49505,
+      "risk": 6.284950000000009,
+      "tp1": 203.3,
+      "tp2": 210.81,
+      "confidence": 88.89,
+      "grade": "A+",
+      "ts": 1784306727,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3782,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "XLM",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 0.18765,
+      "sl": 0.18051055000000002,
+      "risk": 0.007139449999999992,
+      "tp1": 0.1968,
+      "tp2": 0.20749,
+      "confidence": 99.01,
+      "grade": "A+",
+      "ts": 1784306728,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3783,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "UNI",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 3.5472,
+      "sl": 3.4181924999999995,
+      "risk": 0.1290075000000006,
+      "tp1": 3.7412,
+      "tp2": 3.8471,
+      "confidence": 91.8,
+      "grade": "A+",
+      "ts": 1784306729,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3784,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "LTC",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 44.911,
+      "sl": 43.888295,
+      "risk": 1.022705000000002,
+      "tp1": 46.151,
+      "tp2": 47.77457400000001,
+      "confidence": 98.82,
+      "grade": "A+",
+      "ts": 1784306733,
+      "bar_index": 1982562,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 3785,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    }
+  ],
+  "cooldowns": {
+    "ZEC:long": 1982562,
+    "SOL:long": 1982562,
+    "TAO:long": 1982562,
+    "XLM:long": 1982562,
+    "UNI:long": 1982562,
+    "LTC:long": 1982562
+  },
+  "atr_pct_memory": {
+    "BTC": [
+      0.011262700093609591
+    ],
+    "ETH": [
+      0.015595020915059356
+    ],
+    "HYPE": [
+      0.026924030018032855
+    ],
+    "ZEC": [
+      0.03192233098548084
+    ],
+    "NEAR": [
+      0.028162609685067168
+    ],
+    "ONDO": [
+      0.03528708753166493
+    ],
+    "SUI": [
+      0.019212112883657748
+    ],
+    "PENGU": [
+      0.03243782656889546
+    ],
+    "BNB": [
+      0.009846343585148156
+    ],
+    "SOL": [
+      0.015038016024859654
+    ],
+    "TRX": [
+      0.004591994688319704
+    ],
+    "BCH": [
+      0.02055567809275171
+    ],
+    "DOGE": [
+      0.014462920449403347
+    ],
+    "ADA": [
+      0.020841007079237986
+    ],
+    "DOT": [
+      0.019768626015059493
+    ],
+    "TAO": [
+      0.021922382225592965
+    ],
+    "AVAX": [
+      0.01727447266080045
+    ],
+    "LINK": [
+      0.016049219868224895
+    ],
+    "AAVE": [
+      0.02051953217682521
+    ],
+    "XRP": [
+      0.01365866520321065
+    ],
+    "XLM": [
+      0.02128622936239512
+    ],
+    "UNI": [
+      0.02597623221943239
+    ],
+    "LTC": [
+      0.015099309382027661
+    ],
+    "APT": [
+      0.020766112441143025
+    ],
+    "PENDLE": [
+      0.028885436238913337
+    ]
+  },
+  "governor": {
+    "threshold": 66.0,
+    "last_adjust_ts": 0,
+    "daily_count_ema": 6.0
+  },
+  "pathway_weights": {
+    "liquidity_reversal": 1.0,
+    "trend_continuation": 1.0,
+    "momentum_breakout": 1.0
+  },
+  "combo_weights": {
+    "scalp": 1.0,
+    "intraday": 1.0,
+    "swing": 1.0
+  },
+  "symbol_weights": {},
+  "corr_returns": {},
+  "last_summary_ts": 0,
+  "meta": {
+    "version": "3.0.0",
+    "created": 1784306718
+  },
+  "baseline": {
+    "win_rate": null,
+    "profit_factor": null,
+    "avg_rr": null,
+    "n": 0
+  },
+  "circuit_breaker": {
+    "active": false,
+    "since": null,
+    "reason": null
+  }
+}
