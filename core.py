@@ -46,6 +46,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 # --- CONFIGURATION ---
@@ -586,6 +587,8 @@ def _default_state() -> dict:
         "corr_returns": {},
         "last_summary_ts": 0,
         "meta": {"version": "3.0.0", "created": int(time.time())},
+        "baseline": {"win_rate": None, "profit_factor": None, "avg_rr": None, "n": 0},
+        "circuit_breaker": {"active": False, "since": None, "reason": None},
     }
 
 
@@ -1326,6 +1329,12 @@ SYMBOL_WEIGHT_MIN, SYMBOL_WEIGHT_MAX = 0.70, 1.15
 SYMBOL_WEIGHT_LEARNING_RATE = 0.05
 SYMBOL_MIN_SAMPLE = 5
 
+# --- Live-performance circuit breaker ---
+CIRCUIT_BREAKER_WINDOW = 30            # rolling resolved trades considered
+CIRCUIT_BREAKER_WIN_RATE_DROP = 0.20   # absolute win-rate drop vs baseline that trips it
+CIRCUIT_BREAKER_PF_DROP_FRAC = 0.25    # relative profit-factor drop vs baseline that trips it
+BASELINE_MIN_SAMPLE = 30               # resolved trades required before a baseline is trusted
+
 def tune_symbol_weights(state: dict):
     """Same shrink-toward-neutral self-tuning as tune_pathway_weights(),
     but per-symbol, to catch symbol-specific edge decay that pathway-level
@@ -1349,6 +1358,79 @@ def tune_symbol_weights(state: dict):
         current = weights.get(symbol, 1.0)
         weights[symbol] = current + SYMBOL_WEIGHT_LEARNING_RATE * (target - current)
         weights[symbol] = max(SYMBOL_WEIGHT_MIN, min(SYMBOL_WEIGHT_MAX, weights[symbol]))
+
+
+def _update_baseline(state: dict):
+    """Establishes the pre-adaptation-freeze baseline from the first
+    BASELINE_MIN_SAMPLE resolved trades, then stops updating. Mirrors Vantage
+    Annex's approach: the baseline is a fixed reference point, not a moving
+    target, so the circuit breaker measures live drift against a stable
+    anchor rather than one that could itself decay alongside performance."""
+    base = state["baseline"]
+    if base["n"] >= BASELINE_MIN_SAMPLE:
+        return
+    resolved = [h for h in state["signal_history"] if h.get("result") in ("win", "loss")]
+    if not resolved:
+        return
+    base["n"] = len(resolved)
+    wins = sum(1 for h in resolved if h["result"] == "win")
+    base["win_rate"] = wins / len(resolved)
+    base["avg_rr"] = sum(h.get("r_realized", 0.0) for h in resolved) / len(resolved)
+    gross_win = sum(h["r_realized"] for h in resolved if h["result"] == "win")
+    gross_loss = abs(sum(h["r_realized"] for h in resolved if h["result"] == "loss"))
+    base["profit_factor"] = (gross_win / gross_loss) if gross_loss > 1e-9 else None
+
+
+def evaluate_circuit_breaker(state: dict) -> Optional[str]:
+    """Live-performance circuit breaker, ported from Vantage Annex. Dual-metric
+    trip (win rate OR profit factor drops materially below baseline) with a
+    deliberately stricter AND recovery (both metrics must recover) so a single
+    good trade after a bad stretch can't immediately re-enable adaptation.
+    Freezes tune_pathway_weights / tune_symbol_weights / tune_combo_weights
+    only -- signal generation and trade monitoring are unaffected."""
+    _update_baseline(state)
+    base = state["baseline"]
+    cb = state["circuit_breaker"]
+    resolved = [h for h in state["signal_history"] if h.get("result") in ("win", "loss")]
+    recent = resolved[-CIRCUIT_BREAKER_WINDOW:]
+    if base["win_rate"] is None or len(recent) < CIRCUIT_BREAKER_WINDOW:
+        return None
+
+    rolling_wr = sum(1 for h in recent if h["result"] == "win") / len(recent)
+    gains = sum(h["r_realized"] for h in recent if h["r_realized"] > 0)
+    losses = abs(sum(h["r_realized"] for h in recent if h["r_realized"] < 0)) or 1e-9
+    rolling_pf = gains / losses
+
+    wr_trip = base["win_rate"] - rolling_wr >= CIRCUIT_BREAKER_WIN_RATE_DROP
+    pf_trip = (base["profit_factor"] is not None and
+               rolling_pf <= base["profit_factor"] * (1 - CIRCUIT_BREAKER_PF_DROP_FRAC))
+    materially_below = wr_trip or pf_trip
+
+    if not cb["active"] and materially_below:
+        cb["active"] = True
+        cb["since"] = datetime.now(timezone.utc).isoformat()
+        pf_txt = f"{base['profit_factor']:.2f}" if base["profit_factor"] is not None else "n/a"
+        cb["reason"] = (f"win_rate={rolling_wr:.2%} (baseline {base['win_rate']:.2%}), "
+                         f"pf={rolling_pf:.2f} (baseline {pf_txt})")
+        send_telegram(
+            f"\U0001F92F *AXIS ENGINE CIRCUIT BREAKER TRIPPED*\n"
+            f"Rolling live performance deviated materially below baseline: {cb['reason']}.\n"
+            f"Pathway/symbol/combo weight tuning is now FROZEN at last-known-good values. "
+            f"Signal generation continues unaffected."
+        )
+        return "tripped"
+
+    pf_recovered = base["profit_factor"] is None or rolling_pf >= base["profit_factor"]
+    if cb["active"] and rolling_wr >= base["win_rate"] and pf_recovered:
+        cb["active"] = False
+        cb["since"] = None
+        cb["reason"] = None
+        send_telegram(
+            "\u2705 *AXIS ENGINE circuit breaker cleared*\n"
+            "Rolling live performance recovered to baseline. Weight tuning resumed."
+        )
+        return "recovered"
+    return None
 
 
 def tune_pathway_weights(state: dict):
@@ -2014,6 +2096,8 @@ def generate_daily_summary(state: dict) -> str:
         f"Win rate: {win_rate:.1f}%",
         f"Net R: {total_r:+.2f}",
     ]
+    cb = state["circuit_breaker"]
+    lines.append(f"Circuit breaker: {'ACTIVE -- weight tuning frozen (' + str(cb['reason']) + ')' if cb['active'] else 'Inactive'}")
     if resolved:
         by_pathway: dict[str, list] = {}
         by_combo: dict[str, list] = {}
@@ -2135,6 +2219,7 @@ def run_scan():
 
     # reuses the 15m candles already fetched above; no extra request needed
     check_active_signals(state, snapshot, bundles, candle_cache)
+    evaluate_circuit_breaker(state)
 
     btc_bundle = bundles.get("BTC")
     if not btc_bundle:
@@ -2145,9 +2230,13 @@ def run_scan():
     breadth = compute_breadth(bundles, btc_bias)
     log.info("BTC regime: %s (ADX %.1f) | breadth %.0f%%", btc_bias, btc_strength, breadth * 100)
 
-    tune_pathway_weights(state)
-    tune_symbol_weights(state)
-    tune_combo_weights(state)
+    if not state["circuit_breaker"]["active"]:
+        tune_pathway_weights(state)
+        tune_symbol_weights(state)
+        tune_combo_weights(state)
+    else:
+        log.info("Circuit breaker active (%s) -- skipping weight tuning this scan.",
+                  state["circuit_breaker"]["reason"])
 
     fired = []
     threshold = state["governor"]["threshold"]
