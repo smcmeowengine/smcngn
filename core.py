@@ -2076,22 +2076,31 @@ def generate_daily_summary(state: dict) -> str:
     # "breakeven" was a legacy result value from a since-removed SL-to-
     # breakeven code path; nothing sets it anymore, so only win/loss count
     # as resolved here.
-    resolved = [h for h in recent if h.get("result") in ("win", "loss")]
-    wins = [h for h in resolved if h["result"] == "win"]
-    losses = [h for h in resolved if h["result"] == "loss"]
-    open_now = [h for h in recent if h.get("result") == "open"]
+    closed = [h for h in recent if h.get("result") in ("win", "loss")]
+    open_raw = [h for h in recent if h.get("result") == "open"]
+    # A still-open trade that already banked TP1 counts as a win for summary
+    # purposes -- R is provisional (tp1_r) and will be re-synced to the
+    # final r_realized once the trade actually closes, so this can't
+    # double-count across days.
+    tp1_pending = [h for h in open_raw if h.get("tp1_hit")]
+    open_now = [h for h in open_raw if not h.get("tp1_hit")]
     expired = [h for h in recent if h.get("result") == "expired"]
+
+    resolved = closed + tp1_pending
+    wins = [h for h in closed if h["result"] == "win"] + tp1_pending
+    losses = [h for h in closed if h["result"] == "loss"]
     # win-rate/R stats intentionally exclude "expired" (never filled, so no
-    # trade was ever actually taken) -- only win/loss count here.
-    total_r = sum(h.get("r_realized", 0.0) for h in resolved)
+    # trade was ever actually taken) -- only win/loss/tp1-pending count here.
+    total_r = sum(h.get("r_realized", 0.0) for h in closed) + sum(h.get("tp1_r", 0.0) for h in tp1_pending)
     win_rate = (len(wins) / len(resolved) * 100) if resolved else 0.0
 
     lines = [
         "\U0001F4CA *AXIS ENGINE -- 24h Summary*",
         "",
         f"Signals fired: {len(recent)}",
-        f"Resolved: {len(resolved)}  (\u2705 {len(wins)}  |  \u274C {len(losses)})",
-        f"Still open: {len(open_now)}",
+        f"Resolved: {len(resolved)}  (\u2705 {len(wins)}  |  \u274C {len(losses)})"
+        + (f"  [{len(tp1_pending)} via TP1, still running]" if tp1_pending else ""),
+        f"Still open (no TP1 yet): {len(open_now)}",
         f"Expired (never filled): {len(expired)}",
         f"Win rate: {win_rate:.1f}%",
         f"Net R: {total_r:+.2f}",
@@ -2107,12 +2116,12 @@ def generate_daily_summary(state: dict) -> str:
         lines.append("")
         lines.append("By pathway:")
         for pw, items in by_pathway.items():
-            w = sum(1 for i in items if i["result"] == "win")
+            w = sum(1 for i in items if i["result"] == "win" or i in tp1_pending)
             lines.append(f"  \u2022 `{pathway_label(pw)}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
         lines.append("")
         lines.append("By combo:")
         for combo_name, items in by_combo.items():
-            w = sum(1 for i in items if i["result"] == "win")
+            w = sum(1 for i in items if i["result"] == "win" or i in tp1_pending)
             lines.append(f"  \u2022 `{combo_name}`: {w}/{len(items)} ({100*w/len(items):.0f}%)")
     return "\n".join(lines)
 
