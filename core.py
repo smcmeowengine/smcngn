@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AXIS ENGINE v3.1.0
+AXIS ENGINE v3.3.3
 ==================
 Multi-timeframe SMC/ICT crypto perpetual signal engine for Hyperliquid.
 
@@ -26,7 +26,7 @@ every 15 minutes. All persistence lives in state.json next to the script.
 
 Configure via environment variables (see CONFIGURATION below) and run:
 
-    python3 axis_engine_v2_2_2.py
+    python3 axis_engine_v3_3_3.py
 """
 
 from __future__ import annotations
@@ -599,7 +599,7 @@ def _default_state() -> dict:
         "symbol_weights": {},
         "corr_returns": {},
         "last_summary_ts": 0,
-        "meta": {"version": "3.0.0", "created": int(time.time())},
+        "meta": {"version": "3.3.3", "created": int(time.time())},
         "baseline": {"win_rate": None, "profit_factor": None, "avg_rr": None, "n": 0},
         "circuit_breaker": {"active": False, "since": None, "reason": None},
     }
@@ -1693,7 +1693,7 @@ def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v3.0.0* -- {tg_escape(cand.symbol)}/USD",
+        f"*AXIS ENGINE v3.3.3* -- {tg_escape(cand.symbol)}/USD",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{pathway_label(cand.pathway)}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -2218,7 +2218,7 @@ def _prefetch(symbol: str, candle_cache: dict[str, dict]) -> tuple[str, dict | N
 
 
 def run_scan():
-    log.info("=== AXIS ENGINE v3.0.0 scan starting ===")
+    log.info("=== AXIS ENGINE v3.3.3 scan starting ===")
     t_start = time.monotonic()
     state = load_state()
     reconcile_tp1_r(state)
