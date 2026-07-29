@@ -1427,7 +1427,7 @@ def evaluate_circuit_breaker(state: dict) -> Optional[str]:
                          f"pf={rolling_pf:.2f} (baseline {pf_txt})")
         send_telegram(
             f"\U0001F92F *AXIS ENGINE CIRCUIT BREAKER TRIPPED*\n"
-            f"Rolling live performance deviated materially below baseline: {cb['reason']}.\n"
+            f"Rolling live performance deviated materially below baseline: {tg_escape(cb['reason'])}.\n"
             f"Pathway/symbol/combo weight tuning is now FROZEN at last-known-good values. "
             f"Signal generation continues unaffected."
         )
@@ -2119,7 +2119,7 @@ def generate_daily_summary(state: dict) -> str:
         f"Net R: {total_r:+.2f}",
     ]
     cb = state["circuit_breaker"]
-    lines.append(f"Circuit breaker: {'ACTIVE -- weight tuning frozen (' + str(cb['reason']) + ')' if cb['active'] else 'Inactive'}")
+    lines.append(f"Circuit breaker: {'ACTIVE -- weight tuning frozen (' + tg_escape(cb['reason']) + ')' if cb['active'] else 'Inactive'}")
     if resolved:
         by_pathway: dict[str, list] = {}
         by_combo: dict[str, list] = {}
