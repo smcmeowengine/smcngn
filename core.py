@@ -171,14 +171,17 @@ CORR_CLUSTER_THRESHOLD = 0.72
 MIN_OI_USD = 3_000_000
 MIN_ATR_PCT = 0.0012
 MAX_ATR_PCT = 0.12
-# Raised to a hard 2:1 floor on TP2. This is a floor only -- rr() is never
-# clipped down to it, so trades still land wherever the real entry/sl/tp2
-# math and liquidity clipping put them (typically above 2.0, since every
-# pathway's raw TP2 multiplier is already 2.4-2.8x risk before clipping).
-# TP1's 1.4-1.5x multipliers are untouched: TP1 is a deliberate partial-exit
-# level, not the trade's reward target, and forcing it to 2:1 too would fight
-# that two-stage design rather than just tighten it.
-MIN_RR = 2.0
+# Set to 1.7 (between the original v3.1.2 value of 1.4 and the 2.0 hard
+# floor). This is a floor only -- rr() is never clipped down to it, so
+# trades still land wherever the real entry/sl/tp2 math and liquidity
+# clipping put them (typically 2.0+ before clipping, since every pathway's
+# raw TP2 multiplier is already 2.4-2.8x risk). At 1.7, this rejects trades
+# whose TP2 got clipped by liquidity down below a modest reward threshold,
+# while still leaving MIN_RR_OVERRIDES to do the heavier filtering on the
+# specific segment known to need it. TP1's 1.4-1.5x multipliers are
+# untouched: TP1 is a deliberate partial-exit level, not the trade's
+# reward target.
+MIN_RR = 1.7
 
 # Per (combo, pathway) RR floor overrides, applied on top of MIN_RR.
 # `intraday` + `liquidity_reversal` is both the largest segment (n=62, half
@@ -186,14 +189,13 @@ MIN_RR = 2.0
 # reversal), so it's held to a stricter RR bar than everything else so
 # weaker setups get filtered pre-signal rather than showing up post-hoc as
 # losses. Empty by default; populate/adjust per-pair as trailing data warrants.
-# Bumped 1.9 -> 2.5 to preserve the original +0.5-over-base gap now that
-# MIN_RR itself moved to 2.0 -- otherwise this override would have collapsed
-# to equal the new base floor and silently stopped being "stricter" for the
-# segment it was specifically added to guard. This number was tuned to a
-# specific observed win rate, though, so it's worth re-checking against
-# current segment_stats rather than trusting this preserved-gap guess long-term.
+# Set to 2.0 now that MIN_RR (base floor) has dropped to 1.0 -- this keeps
+# the segment's own bar fixed at 2.0 rather than scaling down with the base
+# floor, since it was tuned against this segment's specific win rate
+# (37.1% WR on n=62), not derived as an offset from MIN_RR. Re-check against
+# current segment_stats before trusting this value long-term.
 MIN_RR_OVERRIDES: dict[tuple[str, str], float] = {
-    ("intraday", "liquidity_reversal"): 2.5,
+    ("intraday", "liquidity_reversal"): 2.0,
 }
 
 
