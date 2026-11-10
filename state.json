@@ -1,1 +1,146 @@
-{}
+{
+  "active_signals": [
+    {
+      "symbol": "SOL",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 82.92,
+      "sl": 82.388495,
+      "risk": 0.5315049999999957,
+      "tp1": 83.619,
+      "tp2": 84.40821399999999,
+      "confidence": 94.87,
+      "grade": "A+",
+      "ts": 1794337599,
+      "bar_index": 1993707,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9741,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    }
+  ],
+  "signal_history": [
+    {
+      "symbol": "SOL",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 82.92,
+      "sl": 82.388495,
+      "risk": 0.5315049999999957,
+      "tp1": 83.619,
+      "tp2": 84.40821399999999,
+      "confidence": 94.87,
+      "grade": "A+",
+      "ts": 1794337599,
+      "bar_index": 1993707,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9741,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    }
+  ],
+  "cooldowns": {
+    "SOL:long": 1993707
+  },
+  "atr_pct_memory": {
+    "BTC": [
+      0.012964714540209829
+    ],
+    "ETH": [
+      0.019429604805994136
+    ],
+    "SP500": [
+      0.006221921558160721
+    ],
+    "GOLD": [
+      0.007085100043979641
+    ],
+    "XYZ100": [
+      0.01045501823616802
+    ],
+    "SOL": [
+      0.021200997980564913
+    ],
+    "XRP": [
+      0.02381873432755013
+    ],
+    "ZEC": [
+      0.04345189651181427
+    ],
+    "LINK": [
+      0.02388709651637658
+    ],
+    "BNB": [
+      0.011649023940889918
+    ],
+    "NEAR": [
+      0.03345850627666448
+    ],
+    "HYPE": [
+      0.025425667116594244
+    ],
+    "AVAX": [
+      0.030792190936374735
+    ],
+    "SILVER": [
+      0.01264171373782772
+    ],
+    "COPPER": [
+      0.007245849533936783
+    ],
+    "BRENTOIL": [
+      0.019180491632791213
+    ],
+    "AAVE": [
+      0.030008194308341035
+    ],
+    "LTC": [
+      0.019971081960487608
+    ],
+    "DOGE": [
+      0.02017916941221973
+    ],
+    "TAO": [
+      0.024886444177237642
+    ]
+  },
+  "governor": {
+    "threshold": 66.0,
+    "last_adjust_ts": 0,
+    "daily_count_ema": 5.5
+  },
+  "pathway_weights": {
+    "liquidity_reversal": 1.0,
+    "trend_continuation": 1.0,
+    "momentum_breakout": 1.0
+  },
+  "combo_weights": {
+    "scalp": 1.0,
+    "intraday": 1.0,
+    "swing": 1.0
+  },
+  "symbol_weights": {},
+  "corr_returns": {},
+  "last_summary_ts": 0,
+  "meta": {
+    "version": "3.3.3",
+    "created": 1794337236
+  },
+  "baseline": {
+    "win_rate": null,
+    "profit_factor": null,
+    "avg_rr": null,
+    "n": 0
+  },
+  "circuit_breaker": {
+    "active": false,
+    "since": null,
+    "reason": null
+  }
+}
