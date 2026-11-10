@@ -39,6 +39,7 @@ import os
 import re
 import signal
 import statistics
+import sys
 import threading
 import time
 import logging
@@ -61,11 +62,77 @@ LOG_PATH = os.environ.get("AXIS_LOG_PATH", "axis_engine.log")
 CANDLE_CACHE_PATH = os.environ.get("AXIS_CANDLE_CACHE_PATH", "candle_cache.json")
 CANDLE_DELTA_OVERLAP_BARS = 3  # extra closed bars re-fetched past the cached watermark
 
-WATCHLIST = [
-    "BTC", "ETH", "HYPE", "ZEC", "NEAR", "ONDO", "SUI", "PENGU", "BNB", "SOL",
-    "TRX", "BCH", "DOGE", "ADA", "DOT", "TAO", "AVAX", "LINK", "AAVE", "XRP",
-    "XLM", "UNI", "LTC", "APT", "PENDLE",
+# --- INSTRUMENT REGISTRY / WATCHLIST ---------------------------------------
+# Engine symbols (the keys below) are what state.json, candle_cache.json,
+# cooldowns and trade history already use, so crypto keys stay short ("BTC",
+# not "BTCUSD") to keep all existing records valid.
+#
+# Non-crypto markets are NOT on Hyperliquid's core perp universe. They are
+# HIP-3 builder-deployed perps (here: the "xyz" dex) and are addressed as
+# "<dex>:<NAME>" in every coin-keyed endpoint (candleSnapshot, l2Book) and
+# listed via metaAndAssetCtxs with {"dex": "<dex>"}. Each entry lists
+# `hl_candidates` in priority order; the first one actually found in the
+# live dex universe is used. If none is found the instrument is reported as
+# unsupported -- it is never swapped for a different instrument.
+ASSET_CLASS_LABELS = {
+    "crypto": "Crypto", "index": "Index", "metal": "Precious Metal", "commodity": "Commodity",
+}
+
+INSTRUMENTS: dict[str, dict] = {
+    # symbol: display name, asset class, HIP-3 dex (None = core perps), HL coin candidates
+    "BTC":      {"display": "BTCUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["BTC"]},
+    "ETH":      {"display": "ETHUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["ETH"]},
+    "SP500":    {"display": "S&P500",   "asset_class": "index",     "dex": "xyz", "hl_candidates": ["xyz:SP500"]},
+    "GOLD":     {"display": "GOLD",     "asset_class": "metal",     "dex": "xyz", "hl_candidates": ["xyz:GOLD"]},
+    "XYZ100":   {"display": "XYZ100",   "asset_class": "index",     "dex": "xyz", "hl_candidates": ["xyz:XYZ100"]},
+    "SOL":      {"display": "SOLUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["SOL"]},
+    "XRP":      {"display": "XRPUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["XRP"]},
+    "ZEC":      {"display": "ZECUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["ZEC"]},
+    "LINK":     {"display": "LINKUSD",  "asset_class": "crypto",    "dex": None,  "hl_candidates": ["LINK"]},
+    "BNB":      {"display": "BNBUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["BNB"]},
+    "NEAR":     {"display": "NEARUSD",  "asset_class": "crypto",    "dex": None,  "hl_candidates": ["NEAR"]},
+    "HYPE":     {"display": "HYPEUSD",  "asset_class": "crypto",    "dex": None,  "hl_candidates": ["HYPE"]},
+    "AVAX":     {"display": "AVAXUSD",  "asset_class": "crypto",    "dex": None,  "hl_candidates": ["AVAX"]},
+    "SILVER":   {"display": "SILVER",   "asset_class": "metal",     "dex": "xyz", "hl_candidates": ["xyz:SILVER"]},
+    "COPPER":   {"display": "COPPER",   "asset_class": "commodity", "dex": "xyz", "hl_candidates": ["xyz:COPPER"]},
+    # Brent's canonical coin name on the xyz dex is not consistently documented
+    # (display name BRENTOIL; some sources show xyz:BRENT). Both are tried.
+    "BRENTOIL": {"display": "BRENTOIL", "asset_class": "commodity", "dex": "xyz", "hl_candidates": ["xyz:BRENTOIL", "xyz:BRENT"]},
+    "AAVE":     {"display": "AAVEUSD",  "asset_class": "crypto",    "dex": None,  "hl_candidates": ["AAVE"]},
+    "LTC":      {"display": "LTCUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["LTC"]},
+    "DOGE":     {"display": "DOGEUSD",  "asset_class": "crypto",    "dex": None,  "hl_candidates": ["DOGE"]},
+    "TAO":      {"display": "TAOUSD",   "asset_class": "crypto",    "dex": None,  "hl_candidates": ["TAO"]},
+}
+
+# Order here is the order requested and is preserved everywhere WATCHLIST is iterated.
+MAIN_WATCHLIST = [
+    "BTC", "ETH", "SP500", "GOLD", "XYZ100", "SOL", "XRP", "ZEC", "LINK", "BNB", "NEAR", "HYPE",
 ]
+SECONDARY_WATCHLIST = [
+    "AVAX", "SILVER", "COPPER", "BRENTOIL", "AAVE", "LTC", "DOGE", "TAO",
+]
+WATCHLIST = MAIN_WATCHLIST + SECONDARY_WATCHLIST  # 12 + 8 = 20
+
+WATCHLIST_STATUS_PATH = os.environ.get("AXIS_WATCHLIST_STATUS_PATH", "watchlist_status.json")
+
+# Live-resolved HL coin per engine symbol, and per-symbol availability
+# problems, both rebuilt from the live dex universes each scan.
+_COIN_MAP: dict[str, str] = {}
+_UNAVAILABLE: dict[str, str] = {}  # symbol -> reason (not scanned this run)
+
+
+def asset_class(symbol: str) -> str:
+    """Symbols outside the registry (e.g. legacy crypto symbols that still
+    have an open signal from before the watchlist change) are crypto."""
+    return INSTRUMENTS.get(symbol, {}).get("asset_class", "crypto")
+
+
+def is_crypto(symbol: str) -> bool:
+    return asset_class(symbol) == "crypto"
+
+
+def display_name(symbol: str) -> str:
+    return INSTRUMENTS.get(symbol, {}).get("display", f"{symbol}USD")
 
 # Timeframe combos: (bias, structure, execution). Picked per symbol per
 # scan by the Regime Router based on the symbol's volatility/ADX profile.
@@ -222,6 +289,14 @@ signal.signal(signal.SIGINT, _handle_shutdown)
 # --- HYPERLIQUID API ---
 
 def hl_coin(symbol: str) -> str:
+    """Engine symbol -> Hyperliquid coin name. Uses the name resolved from
+    the live universe when available, else the registry's first candidate
+    (HIP-3 coins need their "<dex>:" prefix), else the symbol itself."""
+    if symbol in _COIN_MAP:
+        return _COIN_MAP[symbol]
+    inst = INSTRUMENTS.get(symbol)
+    if inst:
+        return inst["hl_candidates"][0]
     return symbol.upper()
 
 
@@ -375,33 +450,132 @@ def fetch_all_candles(symbol: str, candle_cache: dict[str, dict] | None = None,
     return bundle
 
 
-def get_meta_and_ctx() -> tuple[list[str], list[dict]] | None:
-    raw = hl_post({"type": "metaAndAssetCtxs"})
-    if not raw or len(raw) < 2:
+def _fetch_dex_raw(dex: str | None) -> list | None:
+    payload: dict = {"type": "metaAndAssetCtxs"}
+    if dex:
+        payload["dex"] = dex
+    raw = hl_post(payload)
+    if not raw or not isinstance(raw, list) or len(raw) < 2:
+        return None
+    return raw
+
+
+def get_meta_and_ctx(dex: str | None = None) -> tuple[list[str], list[dict]] | None:
+    raw = _fetch_dex_raw(dex)
+    if not raw:
         return None
     universe = [a["name"] for a in raw[0]["universe"]]
     return universe, raw[1]
 
 
-def get_market_snapshot() -> dict[str, dict]:
-    """symbol -> {mid, funding, oi_usd, mark}"""
-    out = {}
-    got = get_meta_and_ctx()
-    if not got:
-        return out
-    universe, ctxs = got
-    for i, name in enumerate(universe):
-        if name not in WATCHLIST and name != "BTC":
+def fetch_dex_data(symbols: list[str]) -> dict[str | None, list | None]:
+    """One metaAndAssetCtxs call per dex needed by `symbols` (core perps
+    always, since BTC is always fetched). Returns {dex: raw-or-None}."""
+    dexes: set[str | None] = {None}
+    for s in symbols:
+        dexes.add(INSTRUMENTS.get(s, {}).get("dex"))
+    return {d: _fetch_dex_raw(d) for d in dexes}
+
+
+def resolve_watchlist(dex_raw: dict) -> dict:
+    """Matches each watchlist instrument against the live universe of the
+    dex it belongs to. Fills _COIN_MAP / _UNAVAILABLE and returns a status
+    report. Never substitutes another instrument for a missing one."""
+    _COIN_MAP.clear()
+    _UNAVAILABLE.clear()
+    report = {"supported": [], "unsupported": [], "unavailable": []}
+    for sym in WATCHLIST:
+        inst = INSTRUMENTS[sym]
+        raw = dex_raw.get(inst["dex"])
+        if raw is None:
+            reason = f"market-data fetch failed for dex '{inst['dex'] or 'core'}' this run"
+            _UNAVAILABLE[sym] = reason
+            report["unavailable"].append({"symbol": sym, "reason": reason})
             continue
-        try:
-            ctx = ctxs[i]
-            mark = float(ctx.get("markPx", 0) or 0)
-            funding = float(ctx.get("funding", 0) or 0)
-            oi_coins = float(ctx.get("openInterest", 0) or 0)
-            out[name] = {"mark": mark, "funding": funding, "oi_usd": oi_coins * mark}
-        except (KeyError, ValueError, TypeError, IndexError):
+        by_name = {a["name"].upper(): a for a in raw[0]["universe"]}
+        found = next((c for c in inst["hl_candidates"] if c.upper() in by_name), None)
+        if found is None:
+            reason = (f"none of {inst['hl_candidates']} found in the live "
+                      f"'{inst['dex'] or 'core'}' perp universe")
+            _UNAVAILABLE[sym] = reason
+            report["unsupported"].append({"symbol": sym, "reason": reason})
             continue
+        meta = by_name[found.upper()]
+        if meta.get("isDelisted"):
+            reason = f"{found} is delisted"
+            _UNAVAILABLE[sym] = reason
+            report["unsupported"].append({"symbol": sym, "reason": reason})
+            continue
+        _COIN_MAP[sym] = meta["name"]
+        report["supported"].append({"symbol": sym, "hl_coin": meta["name"]})
+    return report
+
+
+def get_market_snapshot(dex_raw: dict | None = None,
+                        extra_symbols: set[str] | None = None) -> dict[str, dict]:
+    """engine symbol -> {mark, funding, oi_usd}. `extra_symbols` are legacy
+    crypto symbols that are no longer on the watchlist but still have an
+    open signal that must keep being monitored."""
+    out: dict[str, dict] = {}
+    wanted = set(WATCHLIST) | {"BTC"} | (extra_symbols or set())
+    if dex_raw is None:
+        dex_raw = fetch_dex_data(list(wanted))
+    for dex, raw in dex_raw.items():
+        if not raw:
+            continue
+        name_to_sym: dict[str, str] = {}
+        for sym in wanted:
+            inst = INSTRUMENTS.get(sym)
+            if inst is None:                      # legacy crypto symbol, core dex
+                if dex is None:
+                    name_to_sym[sym.upper()] = sym
+            elif inst["dex"] == dex:
+                coin = _COIN_MAP.get(sym)
+                if coin:
+                    name_to_sym[coin.upper()] = sym
+        for i, asset in enumerate(raw[0]["universe"]):
+            sym = name_to_sym.get(asset["name"].upper())
+            if sym is None:
+                continue
+            try:
+                ctx = raw[1][i]
+                mark = float(ctx.get("markPx", 0) or 0)
+                funding = float(ctx.get("funding", 0) or 0)
+                oi_coins = float(ctx.get("openInterest", 0) or 0)
+                out[sym] = {"mark": mark, "funding": funding, "oi_usd": oi_coins * mark}
+            except (KeyError, ValueError, TypeError, IndexError):
+                continue
     return out
+
+
+def write_watchlist_status(report: dict):
+    out = {
+        "updated": int(time.time()),
+        "main": [{"symbol": s, "display": display_name(s), "asset_class": asset_class(s)} for s in MAIN_WATCHLIST],
+        "secondary": [{"symbol": s, "display": display_name(s), "asset_class": asset_class(s)} for s in SECONDARY_WATCHLIST],
+        **report,
+    }
+    tmp = WATCHLIST_STATUS_PATH + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(out, f, indent=2)
+        os.replace(tmp, WATCHLIST_STATUS_PATH)
+    except OSError as e:
+        log.error("Failed to write watchlist status: %s", e)
+
+
+def print_watchlist_report(report: dict):
+    print(f"MAIN WATCHLIST      : {len(MAIN_WATCHLIST)} instruments")
+    print(f"SECONDARY WATCHLIST : {len(SECONDARY_WATCHLIST)} instruments")
+    print(f"TOTAL               : {len(WATCHLIST)} instruments")
+    print(f"Supported ({len(report['supported'])}):")
+    for r in report["supported"]:
+        print(f"  OK   {display_name(r['symbol']):<9} [{ASSET_CLASS_LABELS[asset_class(r['symbol'])]}] -> {r['hl_coin']}")
+    for key, title in (("unsupported", "Unsupported"), ("unavailable", "Unavailable this run")):
+        if report[key]:
+            print(f"{title} ({len(report[key])}):")
+            for r in report[key]:
+                print(f"  !!   {display_name(r['symbol']):<9} {r['reason']}")
 
 
 def get_l2_book(coin: str) -> dict | None:
@@ -694,6 +868,20 @@ def session_weight_now() -> float:
     if 0 <= hour <= 5:
         return 0.75
     return 0.9
+
+
+def feed_is_stale(symbol: str, bundle: dict, bars: int = 3) -> bool:
+    """Non-crypto only. The underlying of an index/metal/commodity perp can
+    be closed (weekend, daily break, holiday) or halted, unlike 24/7 crypto,
+    so no new signals are generated while the last `bars` closed 15m candles
+    show no trading at all (zero volume, or zero range). Crypto is never
+    gated. This is data-driven; it assumes no fixed session calendar."""
+    if is_crypto(symbol):
+        return False
+    recent = bundle.get("15m", [])[-bars:]
+    if len(recent) < bars:
+        return False
+    return all(c["v"] <= 0 for c in recent) or all(c["h"] == c["l"] for c in recent)
 
 
 def update_atr_pct_memory(state: dict, symbol: str, atr_pct: float) -> float:
@@ -1304,7 +1492,8 @@ def score_candidate(cand: Candidate, regime: RegimeVector, state: dict,
     z += 1.3 * (regime.composite_favorability() - 0.5)
 
     # BTC macro alignment bonus/penalty (majors and high-beta alts especially)
-    if cand.symbol != "BTC":
+    # Crypto only: BTC bias is not a valid macro proxy for indices/metals/commodities.
+    if cand.symbol != "BTC" and is_crypto(cand.symbol):
         if (cand.direction == "long" and btc_bias == "bullish") or \
            (cand.direction == "short" and btc_bias == "bearish"):
             z += 0.5
@@ -1691,11 +1880,19 @@ def confidence_bar(confidence: float) -> str:
     return "\u2588" * filled + "\u2591" * (10 - filled)
 
 
+def signal_title_symbol(symbol: str) -> str:
+    """Crypto keeps its existing "<SYM>/USD" title; non-crypto shows its own
+    name and class (e.g. "GOLD [Precious Metal]") rather than a fake /USD pair."""
+    if is_crypto(symbol):
+        return f"{symbol}/USD"
+    return f"{display_name(symbol)} [{ASSET_CLASS_LABELS[asset_class(symbol)]}]"
+
+
 def format_signal(cand: Candidate, confidence: float, grade: str) -> str:
     arrow = "\U0001F7E2 LONG" if cand.direction == "long" else "\U0001F534 SHORT"
     duration = classify_duration(cand.combo_name)
     lines = [
-        f"*AXIS ENGINE v3.3.3* -- {tg_escape(cand.symbol)}/USD",
+        f"*AXIS ENGINE v3.3.3* -- {tg_escape(signal_title_symbol(cand.symbol))}",
         f"{arrow}  |  Grade *{grade}*  |  Pathway: `{pathway_label(cand.pathway)}`",
         "",
         f"Entry:  `{fmt_px(cand.entry)}`",
@@ -2225,9 +2422,23 @@ def run_scan():
     state = load_state()
     reconcile_tp1_r(state)
     candle_cache = load_candle_cache()
-    snapshot = get_market_snapshot()
 
-    symbols_to_fetch = ["BTC"] + [s for s in WATCHLIST if s != "BTC"]
+    # Resolve every watchlist instrument against its live dex universe.
+    # Anything unsupported/unavailable is reported and skipped, never substituted.
+    legacy_open = {s["symbol"] for s in state["active_signals"]} - set(WATCHLIST) - {"BTC"}
+    dex_raw = fetch_dex_data(WATCHLIST + sorted(legacy_open))
+    status = resolve_watchlist(dex_raw)
+    write_watchlist_status(status)
+    for r in status["unsupported"] + status["unavailable"]:
+        log.warning("Watchlist instrument %s not scanned: %s", display_name(r["symbol"]), r["reason"])
+    snapshot = get_market_snapshot(dex_raw, extra_symbols=legacy_open)
+
+    scan_symbols = [s for s in WATCHLIST if s not in _UNAVAILABLE]
+    # Symbols dropped from the watchlist that still have an open signal keep
+    # being fetched so that signal's SL/TP monitoring is unaffected; they are
+    # never evaluated for new signals.
+    symbols_to_fetch = ["BTC"] + [s for s in scan_symbols if s != "BTC"] \
+        + sorted(s for s in legacy_open if s not in scan_symbols)
     bundles: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=FETCH_THREAD_WORKERS) as pool:
         futures = {pool.submit(_prefetch, sym, candle_cache): sym for sym in symbols_to_fetch}
@@ -2251,7 +2462,9 @@ def run_scan():
         save_state(state)
         return
     btc_bias, btc_strength = compute_btc_regime(btc_bundle)
-    breadth = compute_breadth(bundles, btc_bias)
+    # breadth stays a crypto-vs-BTC measure; non-crypto and legacy-monitor bundles are excluded
+    breadth = compute_breadth(
+        {s: b for s, b in bundles.items() if s in WATCHLIST and is_crypto(s)}, btc_bias)
     log.info("BTC regime: %s (ADX %.1f) | breadth %.0f%%", btc_bias, btc_strength, breadth * 100)
 
     if not state["circuit_breaker"]["active"]:
@@ -2269,6 +2482,10 @@ def run_scan():
         if symbol not in bundles:
             continue
         if count_open_for_symbol(state, symbol) >= MAX_CONCURRENT_PER_SYMBOL:
+            continue
+        if feed_is_stale(symbol, bundles[symbol]):
+            log.info("%s skipped: no trading activity in recent candles (market closed/halted?)",
+                     display_name(symbol))
             continue
         try:
             result = evaluate_symbol(symbol, bundles[symbol], state, btc_bias,
@@ -2350,7 +2567,18 @@ def _release_run_lock(lock_file):
     lock_file.close()
 
 
+def check_watchlist():
+    """Read-only: resolves the watchlist against the live API and prints the
+    support report. Places no trades, touches no state, no Telegram."""
+    dex_raw = fetch_dex_data(WATCHLIST)
+    report = resolve_watchlist(dex_raw)
+    print_watchlist_report(report)
+    return 0 if not (report["unsupported"] or report["unavailable"]) else 2
+
+
 def main():
+    if "--check-watchlist" in sys.argv:
+        raise SystemExit(check_watchlist())
     lock_file = _acquire_run_lock()
     if lock_file is None:
         return
