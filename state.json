@@ -20,6 +20,48 @@
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
+    },
+    {
+      "symbol": "XRP",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 1.0688,
+      "sl": 1.0615135,
+      "risk": 0.0072864999999999736,
+      "tp1": 1.0761583333333333,
+      "tp2": 1.0924291666666668,
+      "confidence": 89.58,
+      "grade": "A+",
+      "ts": 1794338123,
+      "bar_index": 1993708,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9742,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "BRENTOIL",
+      "direction": "short",
+      "pathway": "trend_continuation",
+      "combo": "intraday",
+      "entry": 90.047,
+      "sl": 91.048225,
+      "risk": 1.0012250000000051,
+      "tp1": 88.51125,
+      "tp2": 88.13,
+      "confidence": 90.51,
+      "grade": "A+",
+      "ts": 1794338123,
+      "bar_index": 1993708,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9743,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
     }
   ],
   "signal_history": [
@@ -43,77 +85,140 @@
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
+    },
+    {
+      "symbol": "XRP",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 1.0688,
+      "sl": 1.0615135,
+      "risk": 0.0072864999999999736,
+      "tp1": 1.0761583333333333,
+      "tp2": 1.0924291666666668,
+      "confidence": 89.58,
+      "grade": "A+",
+      "ts": 1794338123,
+      "bar_index": 1993708,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9742,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "BRENTOIL",
+      "direction": "short",
+      "pathway": "trend_continuation",
+      "combo": "intraday",
+      "entry": 90.047,
+      "sl": 91.048225,
+      "risk": 1.0012250000000051,
+      "tp1": 88.51125,
+      "tp2": 88.13,
+      "confidence": 90.51,
+      "grade": "A+",
+      "ts": 1794338123,
+      "bar_index": 1993708,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9743,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
     }
   ],
   "cooldowns": {
-    "SOL:long": 1993707
+    "SOL:long": 1993707,
+    "XRP:long": 1993708,
+    "BRENTOIL:short": 1993708
   },
   "atr_pct_memory": {
     "BTC": [
+      0.012964714540209829,
       0.012964714540209829
     ],
     "ETH": [
+      0.019429604805994136,
       0.019429604805994136
     ],
     "SP500": [
+      0.006221921558160721,
       0.006221921558160721
     ],
     "GOLD": [
+      0.007085100043979641,
       0.007085100043979641
     ],
     "XYZ100": [
+      0.01045501823616802,
       0.01045501823616802
     ],
     "SOL": [
       0.021200997980564913
     ],
     "XRP": [
+      0.02381873432755013,
       0.02381873432755013
     ],
     "ZEC": [
+      0.04345189651181427,
       0.04345189651181427
     ],
     "LINK": [
+      0.02388709651637658,
       0.02388709651637658
     ],
     "BNB": [
+      0.011649023940889918,
       0.011649023940889918
     ],
     "NEAR": [
+      0.03345850627666448,
       0.03345850627666448
     ],
     "HYPE": [
+      0.025425667116594244,
       0.025425667116594244
     ],
     "AVAX": [
+      0.030792190936374735,
       0.030792190936374735
     ],
     "SILVER": [
+      0.01264171373782772,
       0.01264171373782772
     ],
     "COPPER": [
+      0.007245849533936783,
       0.007245849533936783
     ],
     "BRENTOIL": [
+      0.019180491632791213,
       0.019180491632791213
     ],
     "AAVE": [
+      0.030008194308341035,
       0.030008194308341035
     ],
     "LTC": [
+      0.019971081960487608,
       0.019971081960487608
     ],
     "DOGE": [
+      0.02017916941221973,
       0.02017916941221973
     ],
     "TAO": [
+      0.024886444177237642,
       0.024886444177237642
     ]
   },
   "governor": {
     "threshold": 66.0,
     "last_adjust_ts": 0,
-    "daily_count_ema": 5.5
+    "daily_count_ema": 5.25
   },
   "pathway_weights": {
     "liquidity_reversal": 1.0,
