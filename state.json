@@ -17,28 +17,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 9741,
-      "last_checked_bar_t": 1794341700000,
-      "entry_filled": true,
-      "bars_pending": 0
-    },
-    {
-      "symbol": "XRP",
-      "direction": "long",
-      "pathway": "liquidity_reversal",
-      "combo": "intraday",
-      "entry": 1.0688,
-      "sl": 1.0615135,
-      "risk": 0.0072864999999999736,
-      "tp1": 1.0761583333333333,
-      "tp2": 1.0924291666666668,
-      "confidence": 89.58,
-      "grade": "A+",
-      "ts": 1794338123,
-      "bar_index": 1993708,
-      "result": "open",
-      "tp1_hit": false,
-      "message_id": 9742,
-      "last_checked_bar_t": 1794341700000,
+      "last_checked_bar_t": 1794342600000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -59,7 +38,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 9743,
-      "last_checked_bar_t": 1794341700000,
+      "last_checked_bar_t": 1794342600000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -81,7 +60,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 9747,
-      "last_checked_bar_t": 1794341700000,
+      "last_checked_bar_t": 1794342600000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -103,7 +82,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 9748,
-      "last_checked_bar_t": 1794341700000,
+      "last_checked_bar_t": 1794342600000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -125,7 +104,7 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 9749,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1794342600000,
       "entry_filled": true,
       "bars_pending": 0
     },
@@ -147,6 +126,28 @@
       "result": "open",
       "tp1_hit": false,
       "message_id": 9750,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
+    },
+    {
+      "symbol": "ZEC",
+      "asset_class": "crypto",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 1048.7,
+      "sl": 1034.7237,
+      "risk": 13.976300000000037,
+      "tp1": 1069.6644500000002,
+      "tp2": 1087.83364,
+      "confidence": 92.81,
+      "grade": "A+",
+      "ts": 1794343524,
+      "bar_index": 1993714,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9752,
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
@@ -188,12 +189,15 @@
       "grade": "A+",
       "ts": 1794338123,
       "bar_index": 1993708,
-      "result": "open",
+      "result": "loss",
       "tp1_hit": false,
       "message_id": 9742,
-      "last_checked_bar_t": null,
+      "last_checked_bar_t": 1794341700000,
       "entry_filled": true,
-      "bars_pending": 0
+      "bars_pending": 0,
+      "exit_price": 1.0615135,
+      "r_realized": -1.0,
+      "closed_ts": 1794343521
     },
     {
       "symbol": "BRENTOIL",
@@ -303,6 +307,28 @@
       "last_checked_bar_t": null,
       "entry_filled": true,
       "bars_pending": 0
+    },
+    {
+      "symbol": "ZEC",
+      "asset_class": "crypto",
+      "direction": "long",
+      "pathway": "liquidity_reversal",
+      "combo": "intraday",
+      "entry": 1048.7,
+      "sl": 1034.7237,
+      "risk": 13.976300000000037,
+      "tp1": 1069.6644500000002,
+      "tp2": 1087.83364,
+      "confidence": 92.81,
+      "grade": "A+",
+      "ts": 1794343524,
+      "bar_index": 1993714,
+      "result": "open",
+      "tp1_hit": false,
+      "message_id": 9752,
+      "last_checked_bar_t": null,
+      "entry_filled": true,
+      "bars_pending": 0
     }
   ],
   "cooldowns": {
@@ -312,7 +338,8 @@
     "SILVER:long": 1993710,
     "HYPE:long": 1993711,
     "LINK:long": 1993712,
-    "GOLD:long": 1993713
+    "GOLD:long": 1993713,
+    "ZEC:long": 1993714
   },
   "atr_pct_memory": {
     "BTC": [
@@ -320,6 +347,7 @@
       0.012964714540209829,
       0.012964714540209829,
       0.012964714540209829,
+      0.01295322974489754,
       0.01295322974489754,
       0.01295322974489754,
       0.01295322974489754
@@ -331,6 +359,7 @@
       0.019429604805994136,
       0.01926073476420134,
       0.01926073476420134,
+      0.01926073476420134,
       0.01926073476420134
     ],
     "SP500": [
@@ -338,6 +367,7 @@
       0.006221921558160721,
       0.006221921558160721,
       0.006221921558160721,
+      0.006228831049254207,
       0.006228831049254207,
       0.006228831049254207,
       0.006228831049254207
@@ -358,6 +388,7 @@
       0.01045501823616802,
       0.010566047139752963,
       0.010566047139752963,
+      0.010566047139752963,
       0.010566047139752963
     ],
     "SOL": [
@@ -365,13 +396,15 @@
     ],
     "XRP": [
       0.02381873432755013,
-      0.02381873432755013
+      0.02381873432755013,
+      0.023944938207618557
     ],
     "ZEC": [
       0.04345189651181427,
       0.04345189651181427,
       0.04345189651181427,
       0.04345189651181427,
+      0.05005597372425869,
       0.05005597372425869,
       0.05005597372425869,
       0.05005597372425869
@@ -391,6 +424,7 @@
       0.011649023940889918,
       0.011843495821774474,
       0.011843495821774474,
+      0.011843495821774474,
       0.011843495821774474
     ],
     "NEAR": [
@@ -398,6 +432,7 @@
       0.03345850627666448,
       0.03345850627666448,
       0.03345850627666448,
+      0.0339034053466513,
       0.0339034053466513,
       0.0339034053466513,
       0.0339034053466513
@@ -416,6 +451,7 @@
       0.030792190936374735,
       0.030029273636269775,
       0.030029273636269775,
+      0.030029273636269775,
       0.030029273636269775
     ],
     "SILVER": [
@@ -431,6 +467,7 @@
       0.007245849533936783,
       0.007341877790609234,
       0.007341877790609234,
+      0.007341877790609234,
       0.007341877790609234
     ],
     "BRENTOIL": [
@@ -444,6 +481,7 @@
       0.030008194308341035,
       0.0296276981146548,
       0.0296276981146548,
+      0.0296276981146548,
       0.0296276981146548
     ],
     "LTC": [
@@ -451,6 +489,7 @@
       0.019971081960487608,
       0.019971081960487608,
       0.019971081960487608,
+      0.0198948067250172,
       0.0198948067250172,
       0.0198948067250172,
       0.0198948067250172
@@ -462,6 +501,7 @@
       0.02017916941221973,
       0.020474019159275512,
       0.020474019159275512,
+      0.020474019159275512,
       0.020474019159275512
     ],
     "TAO": [
@@ -471,13 +511,14 @@
       0.024886444177237642,
       0.024836144557264368,
       0.024836144557264368,
+      0.024836144557264368,
       0.024836144557264368
     ]
   },
   "governor": {
     "threshold": 64.0,
     "last_adjust_ts": 1794339925.0145128,
-    "daily_count_ema": 5.233502500000001
+    "daily_count_ema": 5.510152250000001
   },
   "pathway_weights": {
     "liquidity_reversal": 1.0,
@@ -497,10 +538,10 @@
     "created": 1794337236
   },
   "baseline": {
-    "win_rate": null,
-    "profit_factor": null,
-    "avg_rr": null,
-    "n": 0
+    "win_rate": 0.0,
+    "profit_factor": 0.0,
+    "avg_rr": -1.0,
+    "n": 1
   },
   "circuit_breaker": {
     "active": false,
