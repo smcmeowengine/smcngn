@@ -238,6 +238,18 @@ CORR_CLUSTER_THRESHOLD = 0.72
 MIN_OI_USD = 3_000_000
 MIN_ATR_PCT = 0.0012
 MAX_ATR_PCT = 0.12
+# Per-asset-class (min, max) ATR% band for the hard filter. Crypto keeps the
+# original band unchanged. Indices, metals and commodities are structurally
+# less volatile than crypto (a 15m ATR of ~0.05-0.1% is normal for an equity
+# index or gold), so the crypto floor would reject most of their candidates.
+# These floors are conservative STARTING VALUES, not measured ones -- review
+# them against the "ATR% out of band" debug log lines and adjust.
+ATR_PCT_BAND_BY_CLASS: dict[str, tuple[float, float]] = {
+    "crypto":    (MIN_ATR_PCT, MAX_ATR_PCT),
+    "index":     (0.0004, MAX_ATR_PCT),
+    "metal":     (0.0005, MAX_ATR_PCT),
+    "commodity": (0.0006, MAX_ATR_PCT),
+}
 # Set to 1.7 (between the original v3.1.2 value of 1.4 and the 2.0 hard
 # floor). This is a floor only -- rr() is never clipped down to it, so
 # trades still land wherever the real entry/sl/tp2 math and liquidity
@@ -1790,8 +1802,9 @@ def passes_hard_filters(symbol: str, snapshot: dict, atr_pct: float, cand: Candi
         return False, "no market snapshot"
     if info["oi_usd"] < MIN_OI_USD:
         return False, f"OI too low (${info['oi_usd']:,.0f})"
-    if not (MIN_ATR_PCT <= atr_pct <= MAX_ATR_PCT):
-        return False, f"ATR% out of band ({atr_pct:.4f})"
+    atr_min, atr_max = ATR_PCT_BAND_BY_CLASS.get(asset_class(symbol), (MIN_ATR_PCT, MAX_ATR_PCT))
+    if not (atr_min <= atr_pct <= atr_max):
+        return False, f"ATR% out of band ({atr_pct:.4f}; {asset_class(symbol)} band {atr_min:.4f}-{atr_max:.4f})"
     req_rr = min_rr_for(cand.combo_name, cand.pathway)
     if cand.rr() < req_rr:
         return False, f"RR too low ({cand.rr():.2f} < {req_rr:.2f})"
@@ -1970,7 +1983,8 @@ def react_telegram(message_id: int | None, emoji: str) -> None:
 def record_signal(state: dict, cand: Candidate, confidence: float, grade: str,
                    bar_index: int, message_id: int | None) -> dict:
     entry = {
-        "symbol": cand.symbol, "direction": cand.direction, "pathway": cand.pathway,
+        "symbol": cand.symbol, "asset_class": asset_class(cand.symbol),
+        "direction": cand.direction, "pathway": cand.pathway,
         "combo": cand.combo_name, "entry": cand.entry, "sl": cand.sl,
         "risk": abs(cand.entry - cand.sl), "tp1": cand.tp1, "tp2": cand.tp2,
         "confidence": confidence, "grade": grade, "ts": int(time.time()),
